@@ -1,0 +1,129 @@
+{
+  "name": "oraculo-agents",
+  "version": "1.0",
+  "language": "pt-BR",
+  "summary": "Manifesto enxuto de agentes para operar o Oráculo com estratégia mini-trading. Prioriza pequenas tarefas, validações, testes e persistência de configuração.",
+  "strategy": {
+    "id": "mini_trading",
+    "display": "Mini-Trading",
+    "defaults": {
+      "fracao_capital_pct": 1.0,
+      "min_net_profit_pct": 0.2,
+      "min_ev": 0.08,
+      "min_prob": 0.58,
+      "fee_pct": 0.12,
+      "slippage_pct": 0.05,
+      "decision_window_minutes": 20
+    },
+    "note": "Valores em percentuais. Persistir defaults em RepositorioConfig no primeiro boot. .env deve conter apenas DB_PATH e credenciais AI/LLM."
+  },
+  "policies": {
+    "require_tests_before_commit": true,
+    "require_lint_before_commit": true,
+    "human_gate_for_real_trades": true,
+    "persist_config": true,
+    "task_max_steps": 6,
+    "token_budget_per_task": 800
+  },
+  "agents": [
+    {
+      "id": "coordinator",
+      "role": "orquestrar e delegar",
+      "behavior": "Quebrar tarefas em passos curtos; só promover produção após checklists (tests, lint, metrics, audit).",
+      "task_pattern": ["analisar_estado","criar_subtask","delegar","validar","persistir"]
+    },
+    {
+      "id": "collector",
+      "role": "coletar mercado",
+      "behavior": "Coletar klines e livro; validar timestamps; persistir OHLCV/livro/features; em gaps -> backfill + registrar audit.",
+      "on_error": ["retry_exp_backoff","alert_observability"]
+    },
+    {
+      "id": "feature_engine",
+      "role": "gerar features",
+      "behavior": "Gerar conforme FEATURE_ORDER; rodar teste regressivo local; atualizar exemplo JSON quando mudança de schema." 
+    },
+    {
+      "id": "trainer",
+      "role": "treinar modelos",
+      "behavior": "Treino batch com seed fixo; gerar relatório; QA; propor canary 10% se melhora de métrica.",
+      "promotion_checks": ["melhora_metrica","sem_regressao_critica","qa_ok"]
+    },
+    {
+      "id": "model_server",
+      "role": "servir modelo",
+      "behavior": "Atualizar GerenciadorModelo, expor status em RepositorioConfig, saúde: predict_consistency+drift." 
+    },
+    {
+      "id": "calibrator",
+      "role": "calibrar previsoes",
+      "behavior": "Rodar bandit/ewls; persistir p_conf; manter histórico." 
+    },
+    {
+      "id": "llm",
+      "role": "gerenciar LLM local",
+      "behavior": "Gerenciar prompt cache, embeddings, fallback heurístico; priorizar LLM local para sentimento e sumarização; limitar tokens por chamada." 
+    },
+    {
+      "id": "signal",
+      "role": "gerar sinais",
+      "behavior": "Executar pipeline orquestrado; emitir sinal com campos: acao, confianca_pct, motivo, janela_decisao, prob_trade; publicar em fila apenas se aprovado pelo RiskManager (aprovado_bool)." 
+    },
+    {
+      "id": "probabilistic",
+      "role": "avaliar probabilidade",
+      "behavior": "Gerar ev_buy/ev_sell, prob_up/down; expor thresholds ajustáveis via config." 
+    },
+    {
+      "id": "risk",
+      "role": "avaliar e sizing",
+      "behavior": "Avaliar por usuario; retornar aprovado_bool, fracao_capital_pct (%%), motivos; rejeitar quando violar hard limits." 
+    },
+    {
+      "id": "executor",
+      "role": "executar ordens",
+      "behavior": "Criar ordem de forma idempotente; gravar ordem em DB antes do envio; retries com backoff; default testnet/paper; checar PERMITIR_CONTA_REAL antes de real." 
+    },
+    {
+      "id": "observability",
+      "role": "monitorar",
+      "behavior": "Exportar métricas prometheus; emitir alertas de drift, gaps e falhas de execução; manter dashboard." 
+    },
+    {
+      "id": "qa",
+      "role": "testar",
+      "behavior": "Rodar pytest e suites de integração; gerar report; bloquear promoção se falhas críticas." 
+    },
+    {
+      "id": "devops",
+      "role": "infra/ci",
+      "behavior": "Aplicar migrations, rodar bootstrap_config, gerenciar canary deploys e rollbacks." 
+    }
+  ],
+  "task_templates": {
+    "config_change": [
+      "1) Ler config atual via RepositorioConfig",
+      "2) Propor mudança e justificar com métrica",
+      "3) Rodar testes unitários e lint",
+      "4) Persistir via RepositorioConfig.definir",
+      "5) Registrar audit"
+    ],
+    "signal_cycle": [
+      "1) Coletar dados (klines, livro)",
+      "2) Gerar features",
+      "3) Prever (model_server) e calibrar",
+      "4) Gerar consenso e probabilidade",
+      "5) Avaliar risco e, se aprovado, publicar/execultar"
+    ]
+  },
+  "checks": {
+    "unit_test_cmd": "pytest -q tests/unit",
+    "integration_test_cmd": "pytest -q tests/integration",
+    "lint_cmd": "flake8 src || true",
+    "smoke_cmd": "python -c \"from src.modelagem.gerenciador_modelo import GerenciadorModelo; print(GerenciadorModelo().status())\""
+  },
+  "bootstrap": {
+    "script": "scripts/bootstrap_config.py",
+    "description": "Inserir defaults em RepositorioConfig quando vazio; rodado pelo coordinator no primeiro boot."
+  }
+}

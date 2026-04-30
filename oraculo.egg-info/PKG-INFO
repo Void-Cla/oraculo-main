@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: oraculo
+Version: 0.2.0
+Summary: Plataforma local de analise e automacao do projeto Oraculo
+Requires-Python: >=3.11

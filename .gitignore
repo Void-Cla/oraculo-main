@@ -1,0 +1,17 @@
+
+
+__pycache__/
+*.pyc
+log.txt
+.pytest_cache/
+.pytest_tmp/
+.tmp_pytest/
+_pytest_work/
+../pytest_work/
+dados/*.sqlite-shm
+dados/*.sqlite-wal
+/dados/oraculo.sqlite
+/dados/oraculo.sqlite-shm
+/dados/oraculo.sqlite-wal
+/dados/modelos
+/VoidBan/
