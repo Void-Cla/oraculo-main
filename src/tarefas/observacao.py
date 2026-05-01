@@ -39,6 +39,20 @@ async def aguardar_observacao(
         await asyncio.sleep(max(0, int(intervalo_segundos)))
         LOG.info("observacao_progresso", extra={"simbolo": simbolo, "candle": indice, "total": total})
 
+    motivo_bloqueio = str(await RepositorioConfig.obter("bloqueio_operacional_motivo") or "")
+    if motivo_bloqueio:
+        await RepositorioConfig.definir("retomada_modo", "pausado")
+        await RepositorioConfig.definir("retomada_operacoes_bloqueadas", True)
+        await registrar_audit(
+            "observacao_bloqueio_preservado",
+            "observacao",
+            motivo_bloqueio,
+            simbolo=simbolo,
+            meta={"candles": total},
+        )
+        LOG.error("observacao_bloqueio_preservado", extra={"simbolo": simbolo, "motivo": motivo_bloqueio})
+        return
+
     await RepositorioConfig.definir("retomada_modo", "normal")
     await RepositorioConfig.definir("retomada_operacoes_bloqueadas", False)
     snapshot = dict(await obter_snapshot(simbolo) or {})

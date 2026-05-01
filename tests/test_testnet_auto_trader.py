@@ -3,14 +3,17 @@ import pytest
 from src.servicos.testnet_auto_trader import (
     TestnetAutoTrader as TraderAutoTestnet,
     _ajustes_microtrading_auto,
+    _aplicar_teto_notional,
     _avaliar_saida_ciclo,
     _definir_proxima_acao_esperada,
     _limites_lucro_ciclo,
     _novo_estado,
     _ranquear_simbolos_monitorados,
     _selecionar_simbolo_foco,
+    _usuario_virtual,
 )
 from src.contratos.trading import SignalDecision
+from src.contratos.trading import RiskApproval
 
 
 class _ClienteContaFalso:
@@ -157,6 +160,65 @@ def test_saida_ciclo_aciona_stop_por_movimento_bruto_adverso():
 
     assert resultado["vender"] is True
     assert resultado["motivo"] == "stop_protecao_acionado"
+
+
+def test_estado_limita_notional_operacional(monkeypatch):
+    monkeypatch.setenv("AUTO_MAX_NOTIONAL_USDT", "100")
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 70000})
+
+    assert state["notional_usdt"] == 100.0
+
+
+def test_usuario_virtual_nao_relaxa_risco_configurado():
+    usuario = _usuario_virtual(
+        {
+            "max_trades_abertos": 3,
+            "max_trades_por_hora": 30,
+            "cooldown_minutos": 1,
+            "bloquear_flip_flop": False,
+            "max_exposicao_ativo": 1.0,
+            "risk_per_trade": 1.0,
+            "max_loss_trade_usdt": 1000.0,
+            "paper_trading": True,
+        },
+        modo_testnet=True,
+    )
+    risco = usuario["risk_config"]
+
+    assert risco["max_trades_abertos"] == 1
+    assert risco["max_trades_por_hora"] == 3
+    assert risco["cooldown_minutos"] == 10
+    assert risco["bloquear_flip_flop"] is True
+    assert risco["max_exposicao_ativo"] == 0.20
+    assert risco["risk_per_trade"] == 0.005
+    assert risco["max_loss_trade_usdt"] == 0.20
+
+
+def test_aplicar_teto_revalida_ev_apos_reducao_de_notional():
+    aprovacao = RiskApproval.from_mapping(
+        {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "BUY",
+            "aprovado": True,
+            "paper_trading": False,
+            "fracao_capital": 0.10,
+            "notional_sugerido": 1000.0,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.02,
+            "lucro_liquido_esperado_pct": 0.01,
+            "lucro_liquido_esperado_usdt": 10.0,
+            "ev_liquido_usdt": 2.0,
+            "risk_config_aplicado": {"filtro_ev_minimo_usdt": 1.0},
+        }
+    )
+
+    ajustada = _aplicar_teto_notional(aprovacao, limite_usdt=100.0, saldo_total=1000.0)
+
+    assert ajustada.aprovado is False
+    assert ajustada.ev_liquido_usdt == pytest.approx(0.2)
+    assert any(motivo.startswith("ev_insuficiente_apos_teto") for motivo in ajustada.motivos)
 
 
 @pytest.mark.asyncio
@@ -506,6 +568,7 @@ async def test_auto_trader_troca_foco_para_par_mais_promissor(monkeypatch):
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -647,6 +710,7 @@ async def test_auto_trader_nao_prende_foco_em_par_cruzado_com_residual_abaixo_do
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.008,
             "lucro_liquido_esperado_usdt": 1.2,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -789,6 +853,7 @@ async def test_auto_trader_pula_sell_incompativel_com_fluxo_e_compra_par_viavel(
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.01,
             "lucro_liquido_esperado_usdt": 2.0,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -889,6 +954,7 @@ async def test_auto_trader_compra_so_quando_pipeline_aprova(monkeypatch):
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -996,6 +1062,7 @@ async def test_auto_trader_nao_alterna_para_sell_sem_sinal(monkeypatch):
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -1148,6 +1215,7 @@ async def test_auto_trader_nao_abre_nova_compra_com_ciclo_ativo(monkeypatch):
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -1252,6 +1320,7 @@ async def test_auto_trader_reconcilia_saldo_legado_antes_de_abrir_nova_compra(mo
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -1634,7 +1703,8 @@ async def test_auto_trader_compra_par_cruzado_com_saldo_da_moeda_de_cotacao(monk
             "stop_loss_pct": 0.01,
             "take_profit_pct": 0.02,
             "lucro_liquido_esperado_pct": 0.004,
-            "lucro_liquido_esperado_usdt": 0.04,
+            "lucro_liquido_esperado_usdt": 2.0,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -1953,6 +2023,7 @@ async def test_auto_trader_reconcilia_ultima_compra_do_extrato_antes_de_comprar_
             "take_profit_pct": 0.02,
             "lucro_liquido_esperado_pct": 0.004,
             "lucro_liquido_esperado_usdt": 0.08,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},
@@ -2056,10 +2127,8 @@ async def test_auto_trader_flat_apos_ultima_venda_ignora_sinal_de_venda(monkeypa
     )
 
     assert ger.ordens == []
-    assert trader._state[token]["ciclo_ativo"] is False
-    assert trader._state[token]["ultima_acao_par"] == "SELL"
-    assert trader._state[token]["proxima_acao_esperada"] == "BUY"
-    assert trader._state[token]["ultimo_motivo"] == "proxima_acao_esperada_e_compra"
+    assert trader._state[token]["ultima_acao"] == "PAUSADO"
+    assert trader._state[token]["ultimo_motivo"] == "pnl_fifo_incompleto"
 
 
 @pytest.mark.asyncio
@@ -2312,6 +2381,7 @@ async def test_auto_trader_reutiliza_sinal_final_do_scanner_multiativo(monkeypat
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.02,
             "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
             "confirmacao_multi_timeframe": {},
             "probabilidade_trade": {},
             "janela_decisao": {"executar_apos_ts": 0},

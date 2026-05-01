@@ -1,8 +1,10 @@
+import asyncio
 import os
 
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.persistencia.repositorio_config import RepositorioConfig
 
 
 class _ClienteBinanceFalso:
@@ -387,6 +389,40 @@ def test_inicia_e_pausa_auto_bot_manualmente(tmp_path, monkeypatch):
         assert parar.json()["estado_ciclo"] == "PAUSADO"
         assert parar.json()["config"]["notional_usdt"] == 12.5
         assert len(chamadas_parar) == 1
+
+
+def test_config_operacional_protegida_nao_pode_ser_alterada_por_endpoint_generico(tmp_path):
+    os.environ["DB_PATH"] = str(tmp_path / "config_protegida.sqlite")
+
+    with TestClient(app) as client:
+        resposta = client.put("/v1/config/retomada_operacoes_bloqueadas", json={"valor": False})
+
+    assert resposta.status_code == 403
+    assert resposta.json()["detail"] == "configuracao_operacional_protegida_use_endpoint_ajustes"
+
+
+def test_trading_manual_respeita_bloqueio_operacional(tmp_path, monkeypatch):
+    os.environ["DB_PATH"] = str(tmp_path / "manual_bloqueado.sqlite")
+    monkeypatch.setattr("src.servicos.sessoes.ClienteBinance", _ClienteBinanceFalso)
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/v1/sessao/entrar",
+            json={"api_key": "abcd1234key", "api_secret": "secret9876", "testnet": True},
+        )
+        assert login.status_code == 200
+        asyncio.run(RepositorioConfig.definir("retomada_operacoes_bloqueadas", True))
+        asyncio.run(RepositorioConfig.definir("bloqueio_operacional_motivo", "teste"))
+
+        resposta = client.post(
+            "/v1/trading/manual",
+            json={"simbolo": "BTCUSDT", "lado": "BUY", "notional_usdt": 10.0},
+        )
+        asyncio.run(RepositorioConfig.definir("retomada_operacoes_bloqueadas", False))
+        asyncio.run(RepositorioConfig.definir("bloqueio_operacional_motivo", ""))
+
+    assert resposta.status_code == 423
+    assert resposta.json()["detail"] == "retomada_operacoes_bloqueadas"
 
 
 def test_auto_bot_real_usa_mesmo_fluxo_quando_liberado(tmp_path, monkeypatch):

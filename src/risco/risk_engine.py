@@ -72,7 +72,7 @@ def _avaliar_ev_liquido_usdt(
             ganho_bruto_usdt=ganho_bruto,
             perda_bruta_usdt=perda_bruta,
             valor_ordem_usdt=max(0.0, float(notional_sugerido)),
-            ev_minimo_usdt=float(risk_cfg.get("filtro_ev_minimo_usdt", 1.0) or 0.0),
+            ev_minimo_usdt=max(1.0, float(risk_cfg.get("filtro_ev_minimo_usdt", 1.0) or 0.0)),
             taxa_maker_pct=float(risk_cfg.get("binance_taxa_maker_pct", 0.075) or 0.0),
             taxa_taker_pct=float(risk_cfg.get("binance_taxa_taker_pct", 0.075) or 0.0),
             slippage_pct=float(risk_cfg.get("slippage_pct", 0.05) or 0.0),
@@ -90,10 +90,6 @@ def avaliar_sinal_para_usuario(
 ) -> dict[str, Any]:
     risk_cfg = config_risco_padrao()
     risk_cfg.update(usuario.get("risk_config", {}))
-
-    if usuario.get("testnet"):
-        risk_cfg["lucro_liquido_minimo"] = env_float("LUCRO_MINIMO_TESTNET", -1000000.0)
-        risk_cfg["lucro_liquido_minimo_usdt"] = env_float("LUCRO_MINIMO_USDT_TESTNET", -1000000.0)
 
     saldo = saldo or {}
     estado_execucao = estado_execucao or {}

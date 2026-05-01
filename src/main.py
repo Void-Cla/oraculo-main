@@ -75,11 +75,22 @@ from src.tarefas.consumidor_sinais import loop_consumidor_sinais
 from src.tarefas.carga_teste_rapida import executar_carga_testes
 from src.tarefas.observacao import aguardar_observacao
 from src.tarefas.recalibracao_startup import recalibrar_ao_religar
-from src.tarefas.retomada import avaliar_retomada
+from src.tarefas.retomada import avaliar_retomada, operacoes_bloqueadas_por_retomada
 
 LOG = get_logger("main")
 TESTNET_TRADER = TestnetAutoTrader()
 AUTO_TRADER = TESTNET_TRADER
+
+_CONFIG_PROTEGIDA_ESCRITA = {
+    "ajustes_retomada",
+    "ajustes_risco",
+    "ajustes_sinal",
+    "ajustes_testnet",
+    "bloqueio_operacional_motivo",
+    "retomada_contexto",
+    "retomada_modo",
+    "retomada_operacoes_bloqueadas",
+}
 
 
 class LivroTopoEntrada(BaseModel):
@@ -186,6 +197,17 @@ async def _definir_estado_retomada(app: FastAPI, simbolo: str, modo: str, bloque
 async def _inicializar_retomada(app: FastAPI) -> asyncio.Task | None:
     ajustes = (await obter_ajustes_retomada())["aplicado"]
     simbolo = str(ajustes.get("simbolo_principal") or os.getenv("SIMBOLO_PRINCIPAL") or "BTCUSDT").upper()
+    bloqueio_persistido = bool(await RepositorioConfig.obter("retomada_operacoes_bloqueadas"))
+    motivo_bloqueio = str(await RepositorioConfig.obter("bloqueio_operacional_motivo") or "")
+    if bloqueio_persistido and motivo_bloqueio:
+        contexto = {"modo": "pausado", "mensagem": motivo_bloqueio, "bloqueio_manual": True}
+        app.state.retomada_modo = "pausado"
+        app.state.retomada_operacoes_bloqueadas = True
+        await RepositorioConfig.definir("retomada_modo", "pausado")
+        await RepositorioConfig.definir("retomada_contexto", contexto)
+        await registrar_audit("retomada_bloqueio_preservado", "retomada", motivo_bloqueio, simbolo=simbolo, meta=contexto)
+        LOG.error("retomada_bloqueio_preservado", extra={"simbolo": simbolo, "motivo": motivo_bloqueio})
+        return None
     try:
         contexto = await avaliar_retomada(simbolo, ajustes=ajustes)
     except Exception as exc:
@@ -312,8 +334,12 @@ async def _status_auto_trade(token: str | None, sessao: dict[str, Any]) -> dict[
     config_ajustes = dict(ajustes.get("aplicado") or {})
     status["config"] = {
         "simbolo": config_status.get("simbolo") or config_ajustes.get("simbolo", "BTCUSDT"),
-        "intervalo_segundos": int(config_status.get("intervalo_segundos") or config_ajustes.get("intervalo_segundos", 30)),
-        "notional_usdt": float(config_status.get("notional_usdt") or config_ajustes.get("notional_usdt", 5.0)),
+        "intervalo_segundos": int(
+            config_status["intervalo_segundos"] if config_status.get("intervalo_segundos") is not None else config_ajustes.get("intervalo_segundos", 30)
+        ),
+        "notional_usdt": float(
+            config_status["notional_usdt"] if config_status.get("notional_usdt") is not None else config_ajustes.get("notional_usdt", 5.0)
+        ),
     }
     status["modo_testnet"] = bool(sessao.get("modo_testnet", False))
     status["modo"] = "testnet" if status["modo_testnet"] else "real"
@@ -331,6 +357,12 @@ async def _status_auto_trade_testnet(token: str | None, sessao: dict[str, Any]) 
             "ultimo_motivo": "disponivel_apenas_na_testnet",
         }
     return await _status_auto_trade(token, sessao)
+
+
+async def _config_auto_bloqueada_se_necessario(config: dict[str, Any]) -> dict[str, Any]:
+    if bool(await RepositorioConfig.obter("retomada_operacoes_bloqueadas")) and await RepositorioConfig.obter("bloqueio_operacional_motivo"):
+        return {**config, "notional_usdt": 0.0}
+    return config
 
 
 @app.get("/")
@@ -437,7 +469,7 @@ async def iniciar_auto_testnet(request: Request, entrada: AutoTradeEntrada) -> d
     sessao = await _sessao_autenticada(request)
     if not sessao.get("modo_testnet"):
         raise HTTPException(status_code=403, detail="modo_testnet_obrigatorio")
-    ajustes = await salvar_ajustes_testnet(entrada.model_dump())
+    ajustes = await salvar_ajustes_testnet(await _config_auto_bloqueada_se_necessario(entrada.model_dump()))
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.iniciar(token or "", sessao, ajustes["aplicado"])
     return {"status": status, "ajustes": ajustes}
@@ -448,7 +480,7 @@ async def iniciar_auto(request: Request, entrada: AutoTradeEntrada) -> dict[str,
     sessao = await _sessao_autenticada(request)
     if not sessao.get("modo_testnet") and os.getenv("PERMITIR_CONTA_REAL", "false").lower() != "true":
         raise HTTPException(status_code=403, detail="conta_real_bloqueada")
-    ajustes = await salvar_ajustes_testnet(entrada.model_dump())
+    ajustes = await salvar_ajustes_testnet(await _config_auto_bloqueada_se_necessario(entrada.model_dump()))
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.iniciar(token or "", sessao, ajustes["aplicado"])
     return {"status": status, "ajustes": ajustes}
@@ -461,10 +493,10 @@ async def atualizar_config_auto_testnet(request: Request, entrada: AutoTradeCapi
         raise HTTPException(status_code=403, detail="modo_testnet_obrigatorio")
     atuais = await obter_ajustes_testnet()
     ajustes = await salvar_ajustes_testnet(
-        {
+        await _config_auto_bloqueada_se_necessario({
             **atuais["aplicado"],
             "notional_usdt": float(entrada.notional_usdt),
-        }
+        })
     )
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.atualizar_config(
@@ -479,10 +511,10 @@ async def atualizar_config_auto(request: Request, entrada: AutoTradeCapitalEntra
     sessao = await _sessao_autenticada(request)
     atuais = await obter_ajustes_testnet()
     ajustes = await salvar_ajustes_testnet(
-        {
+        await _config_auto_bloqueada_se_necessario({
             **atuais["aplicado"],
             "notional_usdt": float(entrada.notional_usdt),
-        }
+        })
     )
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.atualizar_config(
@@ -514,6 +546,15 @@ async def trading_manual(request: Request, entrada: ManualTradeEntrada) -> dict[
     modo_testnet = bool(sessao.get("modo_testnet"))
     if not modo_testnet and os.getenv("PERMITIR_CONTA_REAL", "false").lower() != "true":
         raise HTTPException(status_code=403, detail="conta_real_bloqueada")
+    if await operacoes_bloqueadas_por_retomada():
+        await registrar_audit(
+            "ordem_manual_bloqueada",
+            "trading_manual",
+            "retomada_operacoes_bloqueadas",
+            simbolo=entrada.simbolo,
+            meta={"lado": entrada.lado, "modo": "testnet" if modo_testnet else "real"},
+        )
+        raise HTTPException(status_code=423, detail="retomada_operacoes_bloqueadas")
 
     simbolo = _simbolo_monitorado(entrada.simbolo)
     lado = _normalizar_lado(entrada.lado)
@@ -783,6 +824,8 @@ async def obter_config(chave: str) -> dict[str, Any]:
 
 @app.put("/v1/config/{chave}")
 async def definir_config(chave: str, entrada: ConfigEntrada) -> dict[str, Any]:
+    if chave in _CONFIG_PROTEGIDA_ESCRITA:
+        raise HTTPException(status_code=403, detail="configuracao_operacional_protegida_use_endpoint_ajustes")
     await RepositorioConfig.definir(chave, entrada.valor)
     return {"chave": chave, "valor": await RepositorioConfig.obter(chave)}
 
@@ -935,4 +978,5 @@ async def gerar_sinal_usuario(usuario_id: int, entrada: SinalUsuarioEntrada) -> 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("src.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    recarregar = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
+    uvicorn.run("src.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=recarregar)

@@ -228,6 +228,9 @@ async def _historico_negociacoes(
     }
 
 
+calcular_pnl_negociacoes = _historico_negociacoes
+
+
 def _ordens_binance(ordens: list[dict[str, Any]]) -> dict[str, Any]:
     historico: list[dict[str, Any]] = []
     resumo = {

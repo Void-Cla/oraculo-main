@@ -65,6 +65,9 @@ def test_risk_engine_bloqueia_ev_liquido_insuficiente():
     usuario["testnet"] = False
     usuario["risk_config"] = {
         **usuario["risk_config"],
+        "risk_per_trade": 0.05,
+        "max_exposicao_ativo": 1.0,
+        "max_loss_trade_usdt": 10.0,
         "lucro_liquido_minimo": 0.0,
         "lucro_liquido_minimo_usdt": 0.0,
         "filtro_ev_minimo_usdt": 1.0,
@@ -86,6 +89,51 @@ def test_risk_engine_bloqueia_ev_liquido_insuficiente():
 
     assert aprovacao["aprovado"] is False
     assert any(motivo.startswith("ev_insuficiente") for motivo in aprovacao["motivos"])
+
+
+def test_risk_engine_preserva_ev_liquido_quando_aprovado():
+    usuario = _usuario()
+    usuario["testnet"] = False
+    usuario["risk_config"] = {
+        **usuario["risk_config"],
+        "risk_per_trade": 0.05,
+        "max_exposicao_ativo": 1.0,
+        "max_loss_trade_usdt": 10.0,
+        "lucro_liquido_minimo": 0.0,
+        "lucro_liquido_minimo_usdt": 0.0,
+        "filtro_ev_minimo_usdt": 1.0,
+    }
+
+    aprovacao = avaliar_sinal_para_usuario(
+        usuario=usuario,
+        sinal=_sinal_base(),
+        saldo={"saldo_total": 1000.0, "saldo_livre": 1000.0},
+        estado_execucao={},
+    )
+
+    assert aprovacao["aprovado"] is True
+    assert aprovacao["ev_liquido_usdt"] >= 1.0
+
+
+def test_risk_engine_testnet_nao_remove_minimo_de_lucro():
+    usuario = _usuario()
+    usuario["risk_config"] = {
+        **usuario["risk_config"],
+        "lucro_liquido_minimo": 0.004,
+        "lucro_liquido_minimo_usdt": 0.10,
+        "filtro_ev_minimo_usdt": 0.0,
+    }
+    sinal = {**_sinal_base(), "lucro_liquido_esperado_pct": 0.001}
+
+    aprovacao = avaliar_sinal_para_usuario(
+        usuario=usuario,
+        sinal=sinal,
+        saldo={"saldo_total": 1000.0, "saldo_livre": 1000.0},
+        estado_execucao={},
+    )
+
+    assert aprovacao["aprovado"] is False
+    assert "lucro_liquido_abaixo_do_minimo" in aprovacao["motivos"]
 
 
 def test_executor_planeja_ordem_agendada_com_gatilho():

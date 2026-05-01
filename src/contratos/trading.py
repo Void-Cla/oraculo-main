@@ -71,6 +71,7 @@ class RiskApproval:
     take_profit_pct: float
     lucro_liquido_esperado_pct: float
     lucro_liquido_esperado_usdt: float
+    ev_liquido_usdt: float = 0.0
     motivos: list[str] = field(default_factory=list)
     confirmacao_multi_timeframe: dict[str, Any] = field(default_factory=dict)
     probabilidade_trade: dict[str, Any] = field(default_factory=dict)
@@ -93,6 +94,7 @@ class RiskApproval:
             take_profit_pct=float(dados.get("take_profit_pct", 0.0) or 0.0),
             lucro_liquido_esperado_pct=float(dados.get("lucro_liquido_esperado_pct", 0.0) or 0.0),
             lucro_liquido_esperado_usdt=float(dados.get("lucro_liquido_esperado_usdt", 0.0) or 0.0),
+            ev_liquido_usdt=float(dados.get("ev_liquido_usdt", 0.0) or 0.0),
             motivos=list(dados.get("motivos") or []),
             confirmacao_multi_timeframe=dict(dados.get("confirmacao_multi_timeframe") or {}),
             probabilidade_trade=dict(dados.get("probabilidade_trade") or {}),

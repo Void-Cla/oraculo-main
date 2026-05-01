@@ -24,6 +24,7 @@ from src.risco.risk_engine import avaliar_sinal_para_usuario
 from src.servicos.ajustes import obter_ajustes_risco, obter_ajustes_sinal
 from src.core.settings import env_int, env_float
 from src.servicos.noticias import obter_noticias_para_peso
+from src.servicos.painel_conta import calcular_pnl_negociacoes
 from src.sinais.signal_engine import gerar_sinal_orquestrado
 from src.tarefas.retomada import operacoes_bloqueadas_por_retomada
 
@@ -81,6 +82,14 @@ def _notional_quote_para_usdt(notional_quote: float, preco_quote_usdt: float) ->
 
 def _limiar_residuo_ignorado_usdt() -> float:
     return env_float("AUTO_IGNORAR_RESIDUO_ABAIXO_USDT", 5.0, minimo=0.0)
+
+
+def _teto_notional_operacional_usdt() -> float:
+    return env_float("AUTO_MAX_NOTIONAL_USDT", 100.0, minimo=0.0)
+
+
+def _normalizar_notional_operacional(valor: Any) -> float:
+    return min(max(0.0, float(valor or 0.0)), _teto_notional_operacional_usdt())
 
 
 def _valor_posicao_usdt(saldo_base: float, preco_atual_usdt: float) -> float:
@@ -1072,7 +1081,7 @@ def _novo_estado(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "simbolo": str(config.get("simbolo", "BTCUSDT")).upper(),
         "intervalo_segundos": max(5, int(config.get("intervalo_segundos", 30) or 30)),
-        "notional_usdt": max(0.0, float(config.get("notional_usdt", 0.0) or 0.0)),
+        "notional_usdt": _normalizar_notional_operacional(config.get("notional_usdt", 0.0)),
         "modo_testnet": bool(config.get("modo_testnet", True)),
         "modo": "testnet" if bool(config.get("modo_testnet", True)) else "real",
         "ativo": True,
@@ -1149,7 +1158,7 @@ def _novo_estado(config: dict[str, Any]) -> dict[str, Any]:
 def _aplicar_config_estado(state: dict[str, Any], config: dict[str, Any]) -> None:
     state["simbolo"] = str(config.get("simbolo", state.get("simbolo", "BTCUSDT"))).upper()
     state["intervalo_segundos"] = max(5, int(config.get("intervalo_segundos", state.get("intervalo_segundos", 30)) or 30))
-    state["notional_usdt"] = max(0.0, float(config.get("notional_usdt", state.get("notional_usdt", 0.0)) or 0.0))
+    state["notional_usdt"] = _normalizar_notional_operacional(config.get("notional_usdt", state.get("notional_usdt", 0.0)))
     if "modo_testnet" in config:
         state["modo_testnet"] = bool(config.get("modo_testnet"))
         state["modo"] = "testnet" if state["modo_testnet"] else "real"
@@ -1195,13 +1204,13 @@ def _espelhar_estado_par_no_global(estado_global: dict[str, Any], estado_par: di
 
 def _usuario_virtual(ajustes_risco: dict[str, Any], *, modo_testnet: bool) -> dict[str, Any]:
     risk_config = dict(ajustes_risco)
-    risk_config["max_trades_abertos"] = 1
-    risk_config["max_trades_por_hora"] = max(int(risk_config.get("max_trades_por_hora", 0) or 0), 30)
-    risk_config["cooldown_minutos"] = min(int(risk_config.get("cooldown_minutos", 0) or 0), 1)
-    risk_config["bloquear_flip_flop"] = False
-    risk_config["max_exposicao_ativo"] = max(float(risk_config.get("max_exposicao_ativo", 0.20) or 0.20), 1.0)
-    risk_config["risk_per_trade"] = max(float(risk_config.get("risk_per_trade", 0.005) or 0.005), 1.0)
-    risk_config["max_loss_trade_usdt"] = max(float(risk_config.get("max_loss_trade_usdt", 0.20) or 0.20), 1000.0)
+    risk_config["max_trades_abertos"] = min(max(1, int(risk_config.get("max_trades_abertos", 1) or 1)), 1)
+    risk_config["max_trades_por_hora"] = min(max(1, int(risk_config.get("max_trades_por_hora", 1) or 1)), 3)
+    risk_config["cooldown_minutos"] = max(int(risk_config.get("cooldown_minutos", 10) or 10), 10)
+    risk_config["bloquear_flip_flop"] = True
+    risk_config["max_exposicao_ativo"] = min(max(0.0, float(risk_config.get("max_exposicao_ativo", 0.20) or 0.20)), 0.20)
+    risk_config["risk_per_trade"] = min(max(0.0, float(risk_config.get("risk_per_trade", 0.005) or 0.005)), 0.005)
+    risk_config["max_loss_trade_usdt"] = min(max(0.01, float(risk_config.get("max_loss_trade_usdt", 0.20) or 0.20)), 0.20)
     return {
         "id": 0,
         "nome": "auto_trader",
@@ -1250,12 +1259,26 @@ def _aplicar_teto_notional(aprovacao: RiskApproval, limite_usdt: float, saldo_to
     if limite_usdt <= 0.0:
         return aprovacao
     payload = aprovacao.to_dict()
-    novo_notional = min(float(payload.get("notional_sugerido", 0.0) or 0.0), limite_usdt)
+    notional_original = float(payload.get("notional_sugerido", 0.0) or 0.0)
+    novo_notional = min(notional_original, limite_usdt)
     payload["notional_sugerido"] = max(0.0, novo_notional)
     payload["fracao_capital"] = (novo_notional / saldo_total) if saldo_total > 0 else 0.0
     if novo_notional <= 0.0:
         payload["aprovado"] = False
         payload["motivos"] = list(payload.get("motivos") or []) + ["notional_configurado_invalido"]
+    if (
+        str(payload.get("acao") or "").upper() == "BUY"
+        and bool(payload.get("aprovado"))
+        and notional_original > 0.0
+        and novo_notional < notional_original
+    ):
+        ev_original = float(payload.get("ev_liquido_usdt", 0.0) or 0.0)
+        ev_recalculado = ev_original * (novo_notional / notional_original)
+        ev_minimo = max(1.0, float((payload.get("risk_config_aplicado") or {}).get("filtro_ev_minimo_usdt", 1.0) or 0.0))
+        payload["ev_liquido_usdt"] = ev_recalculado
+        if ev_recalculado < ev_minimo:
+            payload["aprovado"] = False
+            payload["motivos"] = list(payload.get("motivos") or []) + [f"ev_insuficiente_apos_teto:{ev_recalculado:.6f}usdt"]
     return RiskApproval.from_mapping(payload)
 
 
@@ -1276,6 +1299,18 @@ class TestnetAutoTrader:
     async def iniciar(self, token: str, sessao: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         config_exec = {**dict(config), "modo_testnet": bool(sessao.get("modo_testnet", False))}
         async with self._lock:
+            if await operacoes_bloqueadas_por_retomada():
+                self._state[token] = _novo_estado(config_exec)
+                self._state[token]["ativo"] = False
+                self._state[token]["estado_ciclo"] = "PAUSADO"
+                self._state[token]["ultimo_motivo"] = "retomada_operacoes_bloqueadas"
+                return self.status(token)
+            if _normalizar_notional_operacional(config_exec.get("notional_usdt", 0.0)) <= 0.0:
+                self._state[token] = _novo_estado(config_exec)
+                self._state[token]["ativo"] = False
+                self._state[token]["estado_ciclo"] = "PAUSADO"
+                self._state[token]["ultimo_motivo"] = "notional_operacional_zero"
+                return self.status(token)
             task = self._tasks.get(token)
             if task and not task.done():
                 state = self._state.get(token)
@@ -1320,7 +1355,7 @@ class TestnetAutoTrader:
         ultimo_motivo = state.get("ultimo_motivo")
         if not ativo and not ciclo_ativo:
             estado_ciclo = "PAUSADO"
-            ultimo_motivo = "bot_pausado"
+            ultimo_motivo = ultimo_motivo or "bot_pausado"
         resumo_ciclos = _resumo_historico_ciclos(state)
         return {
             "ativo": ativo,
@@ -1496,6 +1531,18 @@ class TestnetAutoTrader:
         modo_testnet = bool(sessao.get("modo_testnet", False))
         estado_global["modo_testnet"] = modo_testnet
         estado_global["modo"] = "testnet" if modo_testnet else "real"
+        if await operacoes_bloqueadas_por_retomada():
+            estado_global["ultima_acao"] = "PAUSADO"
+            estado_global["ultimo_motivo"] = "retomada_operacoes_bloqueadas"
+            estado_global["estado_ciclo"] = "PAUSADO"
+            estado_global["ultimo_ts"] = int(time.time() * 1000)
+            return
+        if notional_teto <= 0.0:
+            estado_global["ultima_acao"] = "PAUSADO"
+            estado_global["ultimo_motivo"] = "notional_operacional_zero"
+            estado_global["estado_ciclo"] = "PAUSADO"
+            estado_global["ultimo_ts"] = int(time.time() * 1000)
+            return
         ajustes_risco = (await obter_ajustes_risco())["aplicado"]
         lucro_liquido_minimo_usdt = max(0.01, float(ajustes_risco.get("lucro_liquido_minimo_usdt", 0.01) or 0.01))
         ajustes_sinal_base = _ajustes_microtrading_auto(
@@ -1570,6 +1617,56 @@ class TestnetAutoTrader:
             cliente_conta.obter_trades_conta(simbolo=simbolo, limit=200),
             cliente_conta.obter_ordens_abertas(simbolo=simbolo),
         )
+
+        limite_pnl_conta = env_float("AUTO_MAX_ACCOUNT_PNL_LOSS_USDT", 0.0, minimo=0.0)
+        if trades:
+            try:
+                pnl_conta = await calcular_pnl_negociacoes(
+                    cliente=cliente_conta,
+                    trades=trades,
+                    preco_atual=preco_atual_usdt,
+                    simbolo=simbolo,
+                )
+                pnl_total = float(pnl_conta.get("pnl_realizado_liquido_usdt", 0.0) or 0.0) + float(
+                    pnl_conta.get("pnl_nao_realizado_usdt", 0.0) or 0.0
+                )
+                state["pnl_conta_liquido_usdt"] = pnl_total
+                if bool(pnl_conta.get("cobertura_fifo_incompleta")) or pnl_total < -limite_pnl_conta:
+                    state["ultima_acao"] = "PAUSADO"
+                    state["ultimo_motivo"] = "pnl_fifo_incompleto" if bool(pnl_conta.get("cobertura_fifo_incompleta")) else "pnl_conta_negativo_limite"
+                    state["estado_ciclo"] = "PAUSADO"
+                    state["ultimo_ts"] = int(time.time() * 1000)
+                    await RepositorioConfig.definir("retomada_operacoes_bloqueadas", True)
+                    await RepositorioConfig.definir("retomada_modo", "pausado")
+                    await RepositorioConfig.definir("bloqueio_operacional_motivo", state["ultimo_motivo"])
+                    await self._registrar_evento(
+                        simbolo=simbolo,
+                        state=state,
+                        payload={
+                            "resultado": "execucao_bloqueada",
+                            "motivo": state["ultimo_motivo"],
+                            "pnl_conta": pnl_conta,
+                            "limite_pnl_conta_usdt": limite_pnl_conta,
+                        },
+                    )
+                    _espelhar_estado_corrente()
+                    return
+            except Exception as exc:
+                state["ultima_acao"] = "PAUSADO"
+                state["ultimo_motivo"] = "falha_calcular_pnl_conta_auto"
+                state["estado_ciclo"] = "PAUSADO"
+                state["ultimo_ts"] = int(time.time() * 1000)
+                await RepositorioConfig.definir("retomada_operacoes_bloqueadas", True)
+                await RepositorioConfig.definir("retomada_modo", "pausado")
+                await RepositorioConfig.definir("bloqueio_operacional_motivo", "falha_calcular_pnl_conta_auto")
+                LOG.error("falha_calcular_pnl_conta_auto", extra={"simbolo": simbolo, "erro": str(exc)})
+                await self._registrar_evento(
+                    simbolo=simbolo,
+                    state=state,
+                    payload={"resultado": "execucao_bloqueada", "motivo": state["ultimo_motivo"], "erro": str(exc)},
+                )
+                _espelhar_estado_corrente()
+                return
 
         saldo_total = max(
             _saldo_total_estimado_usdt(saldos_monitorados),

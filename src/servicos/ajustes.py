@@ -67,7 +67,7 @@ def ajustes_testnet_padrao() -> dict[str, Any]:
     return {
         "simbolo": "BTCUSDT",
         "intervalo_segundos": 30,
-        "notional_usdt": 5.0,
+        "notional_usdt": min(5.0, env_float("AUTO_MAX_NOTIONAL_USDT", 100.0, minimo=0.0)),
         "lado_inicial": "BUY",
     }
 
@@ -155,7 +155,14 @@ def normalizar_ajustes_risco(payload: Any) -> dict[str, Any]:
             continue
         valor_num = _normalizar_num(valor)
         if valor_num is not None:
-            saida[chave] = float(valor_num)
+            if chave == "filtro_ev_minimo_usdt":
+                saida[chave] = max(1.0, float(valor_num))
+            elif chave == "lucro_liquido_minimo":
+                saida[chave] = max(float(base[chave]), float(valor_num))
+            elif chave == "lucro_liquido_minimo_usdt":
+                saida[chave] = max(float(base[chave]), float(valor_num))
+            else:
+                saida[chave] = float(valor_num)
     return saida
 
 
@@ -172,7 +179,8 @@ def normalizar_ajustes_testnet(payload: Any) -> dict[str, Any]:
         saida["intervalo_segundos"] = max(5, intervalo)
     notional = _normalizar_num(payload.get("notional_usdt"))
     if notional is not None:
-        saida["notional_usdt"] = max(0.0, float(notional))
+        teto = env_float("AUTO_MAX_NOTIONAL_USDT", 100.0, minimo=0.0)
+        saida["notional_usdt"] = min(max(0.0, float(notional)), teto)
     lado_inicial = payload.get("lado_inicial")
     if isinstance(lado_inicial, str) and lado_inicial.upper() in {"BUY", "SELL"}:
         saida["lado_inicial"] = lado_inicial.upper()
