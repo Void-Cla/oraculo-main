@@ -8,6 +8,7 @@ Comentários e nomes públicos seguem português conciso para consistência.
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -20,8 +21,10 @@ if __package__ in {None, ""}:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
 
+import aiosqlite
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from src.binance_api.cliente import ClienteBinance
@@ -41,7 +44,7 @@ from src.observabilidade.metricas import (
     previsoes_erro_total,
     previsoes_total,
 )
-from src.persistencia.conexao import inicializar_db, obter_db_path
+from src.persistencia.conexao import inicializar_db, obter_db_path, get_conexao
 from src.persistencia.repositorio_auditoria import RepositorioAuditoria
 from src.persistencia.repositorio_config import RepositorioConfig
 from src.persistencia.repositorio_features import RepositorioFeatures
@@ -69,6 +72,7 @@ from src.servicos.noticias import obter_noticias_para_peso, renderizar_fonte_not
 from src.servicos.painel_conta import montar_painel_conta
 from src.servicos.sessoes import criar_sessao_binance, encerrar_sessao, obter_sessao
 from src.servicos.testnet_auto_trader import TestnetAutoTrader
+from src.servicos.ai_advisor import obter_insight, persistir_insight
 from src.sinais.fila_sinais import fila_sinais_global
 from src.tarefas.tarefas_previsao import gerar_previsao_dados_persistidos, gerar_previsao_por_klines, loop_previsao
 from src.tarefas.consumidor_sinais import loop_consumidor_sinais
@@ -168,13 +172,19 @@ class SessaoEntrada(BaseModel):
 
 class AutoTradeEntrada(BaseModel):
     simbolo: str = "BTCUSDT"
-    intervalo_segundos: int = 30
-    notional_usdt: float = 5.0
+    intervalo_segundos: int = 15
+    notional_usdt: float | None = None
+    capital_pct: int | None = None       # 10, 20, ..., 100 (% do saldo USDT disponível)
     lado_inicial: str = "BUY"
 
 
 class AutoTradeCapitalEntrada(BaseModel):
-    notional_usdt: float = 5.0
+    notional_usdt: float | None = None
+    capital_pct: int | None = None       # % do saldo disponível
+
+
+class AiInsightEntrada(BaseModel):
+    simbolo: str = "BTCUSDT"
 
 
 class ManualTradeEntrada(BaseModel):
@@ -242,6 +252,11 @@ async def _inicializar_retomada(app: FastAPI) -> asyncio.Task | None:
     return None
 
 
+async def _verificar_fila_pendente() -> bool:
+    itens = await fila_sinais_global.snapshot(100)
+    return any(str(item.get("status_fila") or "").upper() == "PENDENTE" for item in itens)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     caminho = inicializar_db()
@@ -253,15 +268,29 @@ async def lifespan(app: FastAPI):
     tarefa_observacao = await _inicializar_retomada(app)
     if os.getenv("ATIVAR_LOOP_PREVISAO", "false").lower() == "true":
         tarefa_loop = asyncio.create_task(loop_previsao())
-    if os.getenv("ATIVAR_CONSUMIDOR_SINAIS", "false").lower() == "true":
+    consumidor_ativo = os.getenv("ATIVAR_CONSUMIDOR_SINAIS", "true").lower() == "true"
+    if consumidor_ativo:
         tarefa_consumidor = asyncio.create_task(loop_consumidor_sinais())
+    else:
+        if await _verificar_fila_pendente():
+            LOG.warning(
+                "consumidor_sinais_desativado_com_fila_pendente",
+                extra={"fila_pendente": True},
+            )
     if os.getenv("ATIVAR_CARGA_TESTE", "false").lower() == "true":
         tarefa_carga_teste = asyncio.create_task(executar_carga_testes())
     app.state.tarefa_loop = tarefa_loop
     app.state.tarefa_consumidor = tarefa_consumidor
     app.state.tarefa_carga_teste = tarefa_carga_teste
     app.state.tarefa_observacao = tarefa_observacao
-    LOG.info("app_iniciada", extra={"db_path": str(caminho), "loop_previsao_ativo": tarefa_loop is not None})
+    LOG.info(
+        "app_iniciada",
+        extra={
+            "db_path": str(caminho),
+            "loop_previsao_ativo": tarefa_loop is not None,
+            "consumidor_sinais_ativo": tarefa_consumidor is not None,
+        },
+    )
     try:
         yield
     finally:
@@ -282,6 +311,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Oraculo API", version="0.2.0", lifespan=lifespan)
+
+# Serve frontend estático — usuário acessa diretamente em http://host:8000
+_FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "public"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_FRONTEND_DIR)), name="static")
+    # Arquivos individuais acessíveis na raiz (app.js, estilos.css, img/)
+    for _ext in ("js", "css", "png", "ico", "jpg", "svg", "webp"):
+        pass  # mounting /public directly below handles this
 
 
 def _modelo_status(simbolo: str) -> dict[str, Any]:
@@ -329,6 +366,9 @@ async def _status_auto_trade(token: str | None, sessao: dict[str, Any]) -> dict[
     if not token:
         return {"ativo": False, "estado_ciclo": "INDISPONIVEL", "ultimo_motivo": "sessao_ausente"}
     ajustes = await obter_ajustes_testnet()
+    operacoes_bloqueadas = bool(await RepositorioConfig.obter("retomada_operacoes_bloqueadas"))
+    bloqueio_motivo = str(await RepositorioConfig.obter("bloqueio_operacional_motivo") or "")
+    retomada_modo = str(await RepositorioConfig.obter("retomada_modo") or "")
     status = AUTO_TRADER.status(token)
     config_status = dict(status.get("config") or {})
     config_ajustes = dict(ajustes.get("aplicado") or {})
@@ -343,9 +383,12 @@ async def _status_auto_trade(token: str | None, sessao: dict[str, Any]) -> dict[
     }
     status["modo_testnet"] = bool(sessao.get("modo_testnet", False))
     status["modo"] = "testnet" if status["modo_testnet"] else "real"
+    status["retomada_operacoes_bloqueadas"] = operacoes_bloqueadas
+    status["retomada_modo"] = retomada_modo
+    status["bloqueio_operacional_motivo"] = bloqueio_motivo
     if not status.get("ativo"):
         status["estado_ciclo"] = "PAUSADO"
-        status["ultimo_motivo"] = "bot_pausado"
+        status["ultimo_motivo"] = "retomada_operacoes_bloqueadas" if operacoes_bloqueadas else (status.get("ultimo_motivo") or "bot_pausado")
     return status
 
 
@@ -359,21 +402,39 @@ async def _status_auto_trade_testnet(token: str | None, sessao: dict[str, Any]) 
     return await _status_auto_trade(token, sessao)
 
 
-async def _config_auto_bloqueada_se_necessario(config: dict[str, Any]) -> dict[str, Any]:
+async def _exigir_auto_operacional() -> None:
     if bool(await RepositorioConfig.obter("retomada_operacoes_bloqueadas")) and await RepositorioConfig.obter("bloqueio_operacional_motivo"):
-        return {**config, "notional_usdt": 0.0}
-    return config
+        raise HTTPException(status_code=423, detail="retomada_operacoes_bloqueadas")
 
 
-@app.get("/")
-async def raiz() -> dict[str, Any]:
-    return {
-        "nome": "Oraculo",
-        "versao": app.version,
-        "health": "/v1/health",
-        "metrics": "/v1/metrics",
-        "previsao": "/v1/previsao",
-    }
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def raiz() -> HTMLResponse:
+    """Serve o frontend minimalista."""
+    _idx = _FRONTEND_DIR / "index.html"
+    if _idx.exists():
+        return HTMLResponse(_idx.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Oráculo API</h1><p>Frontend não encontrado em frontend/public/</p>")
+
+
+@app.get("/app.js", include_in_schema=False)
+async def serve_js() -> PlainTextResponse:
+    f = _FRONTEND_DIR / "app.js"
+    return PlainTextResponse(f.read_text(encoding="utf-8"), media_type="application/javascript")
+
+
+@app.get("/estilos.css", include_in_schema=False)
+async def serve_css() -> PlainTextResponse:
+    f = _FRONTEND_DIR / "estilos.css"
+    return PlainTextResponse(f.read_text(encoding="utf-8"), media_type="text/css")
+
+
+@app.get("/img/{filename}", include_in_schema=False)
+async def serve_img(filename: str) -> Response:
+    from fastapi.responses import FileResponse
+    f = _FRONTEND_DIR / "img" / filename
+    if not f.exists() or not f.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(str(f))
 
 
 @app.get("/v1/health")
@@ -469,7 +530,8 @@ async def iniciar_auto_testnet(request: Request, entrada: AutoTradeEntrada) -> d
     sessao = await _sessao_autenticada(request)
     if not sessao.get("modo_testnet"):
         raise HTTPException(status_code=403, detail="modo_testnet_obrigatorio")
-    ajustes = await salvar_ajustes_testnet(await _config_auto_bloqueada_se_necessario(entrada.model_dump()))
+    await _exigir_auto_operacional()
+    ajustes = await salvar_ajustes_testnet(entrada.model_dump())
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.iniciar(token or "", sessao, ajustes["aplicado"])
     return {"status": status, "ajustes": ajustes}
@@ -480,7 +542,25 @@ async def iniciar_auto(request: Request, entrada: AutoTradeEntrada) -> dict[str,
     sessao = await _sessao_autenticada(request)
     if not sessao.get("modo_testnet") and os.getenv("PERMITIR_CONTA_REAL", "false").lower() != "true":
         raise HTTPException(status_code=403, detail="conta_real_bloqueada")
-    ajustes = await salvar_ajustes_testnet(await _config_auto_bloqueada_se_necessario(entrada.model_dump()))
+    await _exigir_auto_operacional()
+    dados = entrada.model_dump()
+    # Resolver capital_pct → notional_usdt
+    if entrada.capital_pct and not entrada.notional_usdt:
+        try:
+            cliente = ClienteBinance(sessao)
+            conta_raw = await cliente.obter_conta_raw()
+            saldo_usdt = 0.0
+            for b in (conta_raw.get("balances") or []):
+                if b.get("asset") == "USDT":
+                    saldo_usdt = float(b.get("free") or 0.0)
+                    break
+            pct = max(10, min(100, int(entrada.capital_pct)))
+            dados["notional_usdt"] = round(saldo_usdt * pct / 100.0, 2)
+        except Exception:
+            dados["notional_usdt"] = 10.0
+    dados.setdefault("notional_usdt", 10.0)
+    dados["notional_usdt"] = max(1.0, float(dados["notional_usdt"] or 10.0))
+    ajustes = await salvar_ajustes_testnet(dados)
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.iniciar(token or "", sessao, ajustes["aplicado"])
     return {"status": status, "ajustes": ajustes}
@@ -492,11 +572,12 @@ async def atualizar_config_auto_testnet(request: Request, entrada: AutoTradeCapi
     if not sessao.get("modo_testnet"):
         raise HTTPException(status_code=403, detail="modo_testnet_obrigatorio")
     atuais = await obter_ajustes_testnet()
+    await _exigir_auto_operacional()
     ajustes = await salvar_ajustes_testnet(
-        await _config_auto_bloqueada_se_necessario({
+        {
             **atuais["aplicado"],
             "notional_usdt": float(entrada.notional_usdt),
-        })
+        }
     )
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.atualizar_config(
@@ -510,11 +591,12 @@ async def atualizar_config_auto_testnet(request: Request, entrada: AutoTradeCapi
 async def atualizar_config_auto(request: Request, entrada: AutoTradeCapitalEntrada) -> dict[str, Any]:
     sessao = await _sessao_autenticada(request)
     atuais = await obter_ajustes_testnet()
+    await _exigir_auto_operacional()
     ajustes = await salvar_ajustes_testnet(
-        await _config_auto_bloqueada_se_necessario({
+        {
             **atuais["aplicado"],
             "notional_usdt": float(entrada.notional_usdt),
-        })
+        }
     )
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.atualizar_config(
@@ -809,6 +891,107 @@ async def listar_oportunidades_multiativo(request: Request, persistir_mercado: b
     return JSONResponse(monitoramento)
 
 
+@app.get("/v1/ai/insight")
+async def ai_insight(request: Request, simbolo: str = "BTCUSDT") -> JSONResponse:
+    """Consulta AI Advisor: lê DB + mercado e retorna recomendação de trade."""
+    sessao = await obter_sessao(request.cookies.get("oraculo_sessao"))
+    simbolo = _simbolo_monitorado(simbolo)
+    predicoes: list[dict] = []
+    outcomes: list[dict] = []
+    features: dict = {}
+    regime = "RANGE"
+    async with get_conexao() as conn:
+        conn.row_factory = aiosqlite.Row
+        # Predições — colunas novas podem não existir em DB antigo
+        try:
+            cur = await conn.execute(
+                "SELECT created_ts,y_hat,y_cal,p_conf,regime,estrategia FROM predictions WHERE simbolo=? ORDER BY created_ts DESC LIMIT 20",
+                (simbolo,),
+            )
+            predicoes = [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            try:
+                cur = await conn.execute(
+                    "SELECT created_ts,y_hat,y_cal,p_conf FROM predictions WHERE simbolo=? ORDER BY created_ts DESC LIMIT 20",
+                    (simbolo,),
+                )
+                predicoes = [dict(r) for r in await cur.fetchall()]
+            except Exception:
+                pass
+        # Outcomes
+        try:
+            cur = await conn.execute(
+                "SELECT ts_previsao,y_true,y_hat,err_rel,regime,confianca FROM outcomes WHERE simbolo=? ORDER BY ts_previsao DESC LIMIT 20",
+                (simbolo,),
+            )
+            outcomes = [dict(r) for r in await cur.fetchall()]
+        except Exception:
+            try:
+                cur = await conn.execute(
+                    "SELECT ts_previsao,y_true,y_hat,err_rel FROM outcomes WHERE simbolo=? ORDER BY ts_previsao DESC LIMIT 20",
+                    (simbolo,),
+                )
+                outcomes = [dict(r) for r in await cur.fetchall()]
+            except Exception:
+                pass
+        # Features
+        try:
+            cur = await conn.execute(
+                "SELECT features_json,regime FROM features_1m WHERE simbolo=? ORDER BY ts DESC LIMIT 1",
+                (simbolo,),
+            )
+            row = await cur.fetchone()
+            if row:
+                try:
+                    features = json.loads(row["features_json"] or "{}")
+                except Exception:
+                    features = {}
+                regime = str(row["regime"] or "") or regime
+        except Exception:
+            try:
+                cur = await conn.execute(
+                    "SELECT features_json FROM features_1m WHERE simbolo=? ORDER BY ts DESC LIMIT 1",
+                    (simbolo,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    try:
+                        features = json.loads(row["features_json"] or "{}")
+                        from src.meta_strategy.regime_detector import detectar_regime
+                        regime = detectar_regime(features).get("regime", "RANGE")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    # Saldo USDT da sessão
+    saldo_usdt = 0.0
+    if sessao:
+        try:
+            cliente = ClienteBinance(sessao)
+            conta_raw = await cliente.obter_conta_raw()
+            for b in (conta_raw.get("balances") or []):
+                if b.get("asset") == "USDT":
+                    saldo_usdt = float(b.get("free") or 0.0)
+                    break
+        except Exception:
+            pass
+    insight = await obter_insight(
+        simbolo=simbolo,
+        regime=regime,
+        features=features,
+        predicoes=predicoes,
+        outcomes=outcomes,
+        saldo_usdt=saldo_usdt,
+    )
+    try:
+        async with get_conexao() as conn2:
+            await persistir_insight(conn2, simbolo, insight, {"regime": regime, "n_predicoes": len(predicoes), "n_outcomes": len(outcomes)})
+    except Exception:
+        pass
+    return JSONResponse(insight)
+
+
+
 @app.get("/v1/config")
 async def listar_config() -> dict[str, Any]:
     return {"itens": await RepositorioConfig.listar_todas()}
@@ -976,7 +1159,18 @@ async def gerar_sinal_usuario(usuario_id: int, entrada: SinalUsuarioEntrada) -> 
 
 
 if __name__ == "__main__":
+    import socket
+    import sys
+
     import uvicorn
 
+    porta = int(os.getenv("PORT", "8000"))
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("0.0.0.0", porta))
+        except OSError:
+            print(f"ERRO: porta {porta} ja esta em uso. Encerre o backend antigo ou defina PORT com outro valor.", file=sys.stderr)
+            raise SystemExit(98)
+
     recarregar = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
-    uvicorn.run("src.api.app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=recarregar)
+    uvicorn.run("src.api.app:app", host="0.0.0.0", port=porta, reload=recarregar)

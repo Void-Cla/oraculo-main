@@ -200,12 +200,51 @@ def _garantir_coluna(conn: sqlite3.Connection, tabela: str, coluna_sql: str) -> 
 
 
 def _garantir_schema_evolutivo(conn: sqlite3.Connection) -> None:
+    # Legado
     _garantir_coluna(conn, "usuarios", "api_key_secret_id TEXT")
     _garantir_coluna(conn, "usuarios", "api_secret_secret_id TEXT")
     _garantir_coluna(conn, "audit", "componente TEXT")
     _garantir_coluna(conn, "audit", "motivo TEXT")
     _garantir_coluna(conn, "audit", "meta_json TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_componente_ts ON audit (componente, created_ts DESC)")
+    # v2 — colunas adicionais para ML e rastreio de capital
+    _garantir_coluna(conn, "ordens", "lucro_usdt REAL")
+    _garantir_coluna(conn, "ordens", "lucro_pct REAL")
+    _garantir_coluna(conn, "ordens", "duracao_ms INTEGER")
+    _garantir_coluna(conn, "ordens", "capital_pct_usado REAL")
+    _garantir_coluna(conn, "ordens", "regime TEXT")
+    _garantir_coluna(conn, "ordens", "estrategia TEXT")
+    _garantir_coluna(conn, "outcomes", "regime TEXT")
+    _garantir_coluna(conn, "outcomes", "estrategia TEXT")
+    _garantir_coluna(conn, "outcomes", "confianca REAL")
+    _garantir_coluna(conn, "outcomes", "capital_pct REAL")
+    _garantir_coluna(conn, "outcomes", "lucro_usdt REAL")
+    _garantir_coluna(conn, "predictions", "regime TEXT")
+    _garantir_coluna(conn, "predictions", "estrategia TEXT")
+    _garantir_coluna(conn, "predictions", "capital_pct REAL")
+    _garantir_coluna(conn, "predictions", "ai_boost REAL")
+    _garantir_coluna(conn, "features_1m", "regime TEXT")
+    _garantir_coluna(conn, "features_1m", "vol_regime TEXT")
+    # v2 — tabela de insights AI
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ai_insights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_ts INTEGER NOT NULL,
+            simbolo TEXT NOT NULL,
+            modelo TEXT NOT NULL,
+            direcao TEXT NOT NULL,
+            confianca REAL,
+            capital_pct_sugerido REAL,
+            reasoning TEXT,
+            risco TEXT,
+            dados_entrada_json TEXT,
+            executado INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_insights_simbolo_ts ON ai_insights (simbolo, created_ts DESC);
+    """)
+    # v2 — tabela de sessions para rastrear capital_pct
+    _garantir_coluna(conn, "usuarios", "capital_pct INTEGER")
+
 
 
 def inicializar_db() -> Path:

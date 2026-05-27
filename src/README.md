@@ -173,7 +173,7 @@ de start em conta real via env `PERMITIR_CONTA_REAL`).
 - `DB_PATH` — caminho para o SQLite (padrao `./dados/oraculo.sqlite`).
 - `MODEL_DIR` — diretório para modelos (padrao `./dados/modelos`).
 - `ATIVAR_LOOP_PREVISAO` — roda loop de previsão automático se `true`.
-- `ATIVAR_CONSUMIDOR_SINAIS` — ativa consumidor da fila de sinais.
+- `ATIVAR_CONSUMIDOR_SINAIS` — ativa consumidor da fila de sinais (ativo por padrão).
 - `ATIVAR_CARGA_TESTE` — ativa carga de teste.
 - `COOKIE_SECURE` — cookie secure flag.
 - `SESSION_TTL_HOURS` — duração TTL das sessões (cookies).
@@ -200,8 +200,8 @@ Para uma lista completa, grep por `os.getenv(` e `env_*` nas fontes.
 uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-4. Para iniciar loops/background workers, setar `ATIVAR_LOOP_PREVISAO=true` e/ou
-	 `ATIVAR_CONSUMIDOR_SINAIS=true` antes de iniciar.
+4. Para iniciar loops/background workers, setar `ATIVAR_LOOP_PREVISAO=true` antes de iniciar.
+   O consumidor de sinais já é ativado por padrão.
 
 Scripts utilitários estão em `scripts/` (migrar DB, criar usuários de teste, etc.).
 

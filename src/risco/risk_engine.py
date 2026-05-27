@@ -3,9 +3,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from src.core.settings import env_float
 from src.risco.filtro_ev import sinal_passa_filtro_ev
 
+# ──────────────────────────────────────────────────────────────
+# Defaults hardcoded — sem os.getenv
+# Todos os valores ajustáveis dinamicamente via risk_cfg injetado
+# ──────────────────────────────────────────────────────────────
 
 def config_risco_padrao() -> dict[str, Any]:
     return {
@@ -15,22 +18,27 @@ def config_risco_padrao() -> dict[str, Any]:
         "max_daily_loss_usdt": 1.0,
         "max_loss_trade_usdt": 0.20,
         "max_exposicao_ativo": 0.20,
-        "max_trades_abertos": 3,
-        "max_trades_por_hora": 3,
-        "cooldown_minutos": 10,
+        "max_trades_abertos": 5,
+        "max_trades_por_hora": 40,
+        "cooldown_minutos": 1,
         "bloquear_flip_flop": True,
-        "lucro_liquido_minimo": env_float("LUCRO_LIQUIDO_MINIMO_PCT", env_float("SIGNAL_MIN_NET_PROFIT_PCT", 0.0045), minimo=0.0),
-        "lucro_liquido_minimo_usdt": env_float("LUCRO_LIQUIDO_MINIMO_USDT", 0.10, minimo=0.0),
-        "filtro_ev_minimo_usdt": env_float("FILTRO_EV_MINIMO_USDT", 1.0, minimo=0.0),
-        "binance_taxa_maker_pct": env_float("BINANCE_TAXA_MAKER_PCT", 0.075, minimo=0.0),
-        "binance_taxa_taker_pct": env_float("BINANCE_TAXA_TAKER_PCT", 0.075, minimo=0.0),
-        "slippage_pct": env_float("SIGNAL_SLIPPAGE_PCT", 0.0005, minimo=0.0) * 100.0,
+        "lucro_liquido_minimo": 0.0005,
+        "lucro_liquido_minimo_usdt": 0.01,
+        "filtro_ev_minimo_usdt": 0.01,
+        "binance_taxa_maker_pct": 0.1,
+        "binance_taxa_taker_pct": 0.1,
+        "slippage_pct": 0.0005,
         "paper_trading": True,
     }
 
 
 def _clamp(valor: float, minimo: float, maximo: float) -> float:
     return max(minimo, min(maximo, valor))
+
+
+def ev_minimo_liquido_usdt(risk_cfg: dict[str, Any]) -> float:
+    configurado = max(0.0, float(risk_cfg.get("filtro_ev_minimo_usdt", 0.01) or 0.0))
+    return max(0.01, configurado)
 
 
 def _probabilidades_por_acao(sinal: dict[str, Any]) -> tuple[float, float]:
@@ -72,10 +80,10 @@ def _avaliar_ev_liquido_usdt(
             ganho_bruto_usdt=ganho_bruto,
             perda_bruta_usdt=perda_bruta,
             valor_ordem_usdt=max(0.0, float(notional_sugerido)),
-            ev_minimo_usdt=max(1.0, float(risk_cfg.get("filtro_ev_minimo_usdt", 1.0) or 0.0)),
-            taxa_maker_pct=float(risk_cfg.get("binance_taxa_maker_pct", 0.075) or 0.0),
-            taxa_taker_pct=float(risk_cfg.get("binance_taxa_taker_pct", 0.075) or 0.0),
-            slippage_pct=float(risk_cfg.get("slippage_pct", 0.05) or 0.0),
+            ev_minimo_usdt=ev_minimo_liquido_usdt(risk_cfg),
+            taxa_maker_pct=float(risk_cfg.get("binance_taxa_maker_pct", 0.1) or 0.0),
+            taxa_taker_pct=float(risk_cfg.get("binance_taxa_taker_pct", 0.1) or 0.0),
+            slippage_pct=float(risk_cfg.get("slippage_pct", 0.0005) or 0.0),
         )
         return passou, ev_liquido, None
     except Exception as exc:
@@ -90,6 +98,7 @@ def avaliar_sinal_para_usuario(
 ) -> dict[str, Any]:
     risk_cfg = config_risco_padrao()
     risk_cfg.update(usuario.get("risk_config", {}))
+    risk_cfg["modo_testnet"] = bool(usuario.get("testnet", False))
 
     saldo = saldo or {}
     estado_execucao = estado_execucao or {}
@@ -105,7 +114,7 @@ def avaliar_sinal_para_usuario(
     ultima_acao = str(estado_execucao.get("ultima_acao", "") or "").upper()
     sinal_ts = int(sinal.get("ts", 0) or 0)
     lucro_liquido_esperado = float(sinal.get("lucro_liquido_esperado_pct", 0.0) or 0.0)
-    cooldown_minutos = int(risk_cfg.get("cooldown_minutos", 10) or 10)
+    cooldown_minutos = int(risk_cfg.get("cooldown_minutos", 1) or 1)
     cooldown_ms = max(0, cooldown_minutos) * 60 * 1000
 
     motivos: list[str] = []
@@ -125,6 +134,7 @@ def avaliar_sinal_para_usuario(
     if perda_diaria_usdt >= float(risk_cfg.get("max_daily_loss_usdt", 1.0) or 1.0):
         aprovado = False
         motivos.append("perda_diaria_usdt_excedida")
+
     if exposicao_ativo >= float(risk_cfg["max_exposicao_ativo"]):
         aprovado = False
         motivos.append("exposicao_excedida")
@@ -134,7 +144,7 @@ def avaliar_sinal_para_usuario(
         aprovado = False
         motivos.append("limite_trades_abertos")
 
-    max_trades_hora = int(risk_cfg.get("max_trades_por_hora", 3) or 3)
+    max_trades_hora = int(risk_cfg.get("max_trades_por_hora", 40) or 40)
     if max_trades_hora > 0 and trades_ultima_hora >= max_trades_hora:
         aprovado = False
         motivos.append("limite_trades_por_hora")
@@ -148,12 +158,14 @@ def avaliar_sinal_para_usuario(
         and ultima_acao in {"BUY", "SELL"}
         and sinal.get("acao") in {"BUY", "SELL"}
         and ultima_acao != sinal["acao"]
-        and (cooldown_ms == 0 or ultimo_trade_ts <= 0 or sinal_ts <= 0 or (sinal_ts - ultimo_trade_ts) < (cooldown_ms * 2))
+        and ultimo_trade_ts > 0 and sinal_ts > 0
+        and (sinal_ts - ultimo_trade_ts) < (cooldown_ms * 2)
     ):
         aprovado = False
         motivos.append("flip_flop_bloqueado")
 
-    if lucro_liquido_esperado < float(risk_cfg.get("lucro_liquido_minimo", 0.002) or 0.002):
+    lucro_minimo_pct = float(risk_cfg.get("lucro_liquido_minimo", 0.0005) or 0.0)
+    if lucro_liquido_esperado < lucro_minimo_pct:
         aprovado = False
         motivos.append("lucro_liquido_abaixo_do_minimo")
 
@@ -171,26 +183,16 @@ def avaliar_sinal_para_usuario(
     fracao_capital = (notional_sugerido / saldo_total) if saldo_total > 0 else 0.0
     lucro_liquido_esperado_usdt = notional_sugerido * lucro_liquido_esperado
 
-    target_lucro_usdt = env_float("TARGET_LUCRO_LIQ_USDT", 0.0)
-    if target_lucro_usdt > 0 and lucro_liquido_esperado > 0:
-        max_increase = env_float("TARGET_NOTIONAL_MAX_INCREASE_FACTOR", 2.0, minimo=1.0)
-        required_notional = float(Decimal(str(target_lucro_usdt)) / Decimal(str(lucro_liquido_esperado)))
-        allowed_max_notional = notional_sugerido * max_increase
-        allowed_by_limits = min(notional_limite, saldo_livre)
-        if required_notional <= allowed_max_notional and required_notional <= allowed_by_limits:
-            notional_sugerido = required_notional
-            fracao_capital = (notional_sugerido / saldo_total) if saldo_total > 0 else 0.0
-            lucro_liquido_esperado_usdt = notional_sugerido * lucro_liquido_esperado
-
-    if fracao_capital <= 0.0:
+    if fracao_capital <= 0.0 and "exposicao_excedida" not in motivos:
         aprovado = False
         motivos.append("fracao_calculada_invalida")
-    if lucro_liquido_esperado_usdt < float(risk_cfg.get("lucro_liquido_minimo_usdt", 0.05) or 0.05):
+
+    lucro_minimo_usdt = float(risk_cfg.get("lucro_liquido_minimo_usdt", 0.01) or 0.01)
+    if lucro_liquido_esperado_usdt < lucro_minimo_usdt:
         aprovado = False
         motivos.append("lucro_liquido_usdt_abaixo_do_minimo")
 
     ev_liquido_usdt = 0.0
-    erro_ev: str | None = None
     if aprovado:
         passou_ev, ev_liquido_usdt, erro_ev = _avaliar_ev_liquido_usdt(sinal, notional_sugerido, risk_cfg)
         if not passou_ev:

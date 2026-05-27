@@ -15,3 +15,16 @@ dados/*.sqlite-wal
 /dados/oraculo.sqlite-wal
 /dados/modelos
 /VoidBan/
+# Credenciais — nunca comitar
+.env
+.env.local
+.env.production
+
+# Venv
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+frontend/node_modules/

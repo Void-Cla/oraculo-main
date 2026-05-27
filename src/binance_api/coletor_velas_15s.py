@@ -17,8 +17,8 @@ LOG = get_logger("coletor_15s")
 
 
 def simbolos_monitorados() -> List[str]:
-    s = os.getenv("SYMBOLS") or os.getenv("MONITORED_PAIRS") or ""
-    return [x.strip().upper() for x in s.split(",") if x.strip()]
+    from src.multiativo.config import pares_monitorados
+    return list(pares_monitorados())
 
 
 async def coletar_snapshot_15s(simbolo: str) -> Dict[str, Any]:

@@ -1,522 +1,169 @@
 <!doctype html>
 <html lang="pt-BR">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Oráculo | Bot Autônomo Multiativo</title>
-  <link rel="icon" type="image/png" href="/img/oraculo.png" />
-  <link rel="stylesheet" href="/estilos.css" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Oráculo · Auto-Trading</title>
+  <link rel="icon" type="image/png" href="/img/oraculo.png"/>
+  <link rel="stylesheet" href="/estilos.css"/>
   <script defer src="/app.js"></script>
 </head>
 <body>
 
-  <!-- Partículas animadas -->
-  <canvas id="particle-canvas"></canvas>
+<!-- LOGIN -->
+<section id="login" class="card login-card">
+  <div class="brand">
+    <img src="/img/oraculo.png" alt="Oráculo" class="logo"/>
+    <div>
+      <h1>Oráculo</h1>
+      <p class="sub">Auto-Trading Autônomo · Binance</p>
+    </div>
+  </div>
+  <form id="formLogin">
+    <label>API Key
+      <input id="apiKey" type="password" autocomplete="off" placeholder="Chave pública" required/>
+    </label>
+    <label>API Secret
+      <input id="apiSecret" type="password" autocomplete="off" placeholder="Chave secreta" required/>
+    </label>
+    <label class="toggle-row">
+      <span>Testnet</span>
+      <label class="switch">
+        <input id="usarTestnet" type="checkbox" checked/>
+        <span class="slider"></span>
+      </label>
+      <span id="modoLabel">Testnet</span>
+    </label>
+    <p id="erroLogin" class="erro hidden"></p>
+    <button type="submit" id="btnEntrar">Conectar</button>
+  </form>
+</section>
 
-  <div class="layout">
+<!-- APP -->
+<div id="app" class="hidden">
 
-    <!-- ══ CABEÇALHO / HERO ══════════════════════════════════════ -->
-    <header class="hero">
-      <div class="hero__marca">
-        <img class="hero__logo" src="/img/oraculo.png" alt="Oráculo" />
-        <div>
-          <p class="eyebrow">Void-Hub · Sistema autônomo</p>
-          <h1>Oráculo Autônomo</h1>
-          <p class="hero__texto">
-            Bot de investimentos na Binance que opera sozinho — analisa o mercado, escolhe o momento certo e executa as ordens por você.
-          </p>
+  <!-- TOPBAR -->
+  <header class="topbar">
+    <div class="topbar__brand">
+      <img src="/img/oraculo.png" alt="Oráculo" class="logo-sm"/>
+      <span>Oráculo</span>
+    </div>
+    <div class="topbar__status">
+      <span id="badgeModo" class="badge">Testnet</span>
+      <span id="badgeConexao" class="badge badge-ok">Conectado</span>
+      <span id="labelConta" class="muted-sm"></span>
+    </div>
+    <button id="btnSair" class="btn-ghost">Sair</button>
+  </header>
+
+  <!-- GRID PRINCIPAL -->
+  <main class="grid">
+
+    <!-- COLUNA ESQUERDA: CONTROLE -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Auto-Trading</h2>
+        <span id="badgeBot" class="badge">Pausado</span>
+      </div>
+
+      <!-- SALDO -->
+      <div class="stat-row">
+        <div class="stat">
+          <span class="stat-label">Saldo disponível</span>
+          <strong id="valSaldo" class="stat-big">--</strong>
+          <span id="valSaldoPct" class="stat-pct neutral">0,00%</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">PnL líquido</span>
+          <strong id="valPnl" class="stat-big">--</strong>
+          <span id="valPnlPct" class="stat-pct neutral">0,00%</span>
         </div>
       </div>
-      <div class="hero__status">
-        <span id="statusConexao" class="badge badge--neutral">Aguardando login</span>
-        <span id="statusModo" class="badge badge--soft">Sem sessão</span>
-        <span id="ultimaAtualizacao" class="hero__timestamp">Sem sincronização</span>
-      </div>
-    </header>
 
-    <!-- ══ TELA DE LOGIN ═════════════════════════════════════════ -->
-    <section id="painelLogin" class="login-card">
-      <div class="section-head">
-        <div>
-          <p class="eyebrow">Conexão Binance</p>
-          <h2>Conecte sua conta para o bot operar</h2>
+      <!-- CAPITAL % -->
+      <div class="capital-block">
+        <label>Capital para operar
+          <span id="capitalPctLabel" class="pct-label">30%</span>
+        </label>
+        <input id="capitalPct" type="range" min="10" max="100" step="10" value="30"/>
+        <div class="pct-marks">
+          <span>10%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
         </div>
-        <span class="badge badge--soft">Sessão segura</span>
+        <p id="capitalUsdt" class="capital-usdt muted-sm">≈ -- USDT</p>
       </div>
-      <p class="muted">
-        Informe sua chave de API da Binance. O bot cuida de tudo automaticamente — pesos, filtros e cálculos ficam por conta dele.
-        Você só acompanha e liga ou desliga quando quiser.
-      </p>
-      <form id="formLogin" class="login-form">
-        <label class="field">
-          <span>API Key (chave de acesso)</span>
-          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Chave pública da API" required />
-        </label>
-        <label class="field">
-          <span>API Secret (senha da chave)</span>
-          <input id="apiSecret" type="password" autocomplete="off" spellcheck="false" placeholder="Chave secreta da API" required />
-        </label>
-        <label class="field field--toggle" for="usarTestnet">
-          <span>Ambiente de operação</span>
-          <span class="toggle">
-            <input id="usarTestnet" type="checkbox" />
-            <span>Usar Testnet (dinheiro fictício para testes)</span>
-          </span>
-        </label>
-        <button id="btnEntrar" type="submit" class="btn btn--primary">Conectar e entrar</button>
-      </form>
-      <p id="mensagemLogin" class="muted" style="margin-top:12px">
-        Informe as credenciais e escolha entre conta real e Testnet.
-      </p>
+
+      <!-- BOTÃO START/STOP -->
+      <button id="btnToggle" class="btn-primary btn-lg">Iniciar Auto-Trading</button>
+      <p id="msgBot" class="muted-sm"></p>
     </section>
 
-    <!-- ══ PAINEL PRINCIPAL (após login) ════════════════════════ -->
-    <section id="painelApp" class="app-shell hidden">
+    <!-- COLUNA DIREITA: MÉTRICAS + AI -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Métricas</h2>
+        <span id="tsAtualiza" class="muted-sm">--</span>
+        <button id="btnRefresh" class="btn-ghost btn-sm">↺</button>
+      </div>
 
-      <!-- ── SIDEBAR ──────────────────────────────────────────── -->
-      <aside class="sidebar">
-
-        <!-- Sessão ativa -->
-        <div class="session-card">
-          <p class="eyebrow">Sessão ativa</p>
-          <strong id="nomeSessao">Conta não conectada</strong>
-          <span id="detalheSessao" class="muted">Sem sessão ativa</span>
+      <div class="metrics-grid">
+        <div class="metric">
+          <span class="metric-label">Win Rate</span>
+          <strong id="mWinRate">--%</strong>
         </div>
-
-        <!-- Navegação principal -->
-        <nav class="nav-tabs" aria-label="Telas principais">
-          <button class="nav-tabs__item nav-tabs__item--active" type="button" data-tab="dashboard">
-            Dashboard
-          </button>
-          <button class="nav-tabs__item" type="button" data-tab="bot">
-            Bot autônomo
-          </button>
-          <button class="nav-tabs__item" type="button" data-tab="noticias">
-            Notícias &amp; fontes
-          </button>
-        </nav>
-
-        <!-- Mini cards de resumo -->
-        <div class="sidebar-stack">
-          <article class="mini-card">
-            <span class="mini-card__label">Saldo</span>
-            <strong id="sidebarConta">--</strong>
-            <span id="sidebarContaTexto" class="muted">Total estimado em USDT</span>
-          </article>
-          <article class="mini-card">
-            <span class="mini-card__label">Modelo IA</span>
-            <strong id="sidebarModelo">Aguardando</strong>
-            <span id="sidebarModeloTexto" class="muted">Sem leitura recente</span>
-          </article>
-          <article class="mini-card">
-            <span class="mini-card__label">Bot</span>
-            <strong id="sidebarBot">Pausado</strong>
-            <span id="sidebarBotTexto" class="muted">Sem ciclo aberto</span>
-          </article>
-          <article class="mini-card">
-            <span class="mini-card__label">Notícias</span>
-            <strong id="sidebarNoticias">6 pares</strong>
-            <span id="sidebarNoticiasTexto" class="muted">Cobertura multipar</span>
-          </article>
+        <div class="metric">
+          <span class="metric-label">Trades hoje</span>
+          <strong id="mTrades">--</strong>
         </div>
+        <div class="metric">
+          <span class="metric-label">Regime mercado</span>
+          <strong id="mRegime">--</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Desconto BNB</span>
+          <strong id="mBnb">--</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Taxa efetiva</span>
+          <strong id="mTaxa">--%</strong>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Melhor par</span>
+          <strong id="mMelhorPar">--</strong>
+        </div>
+      </div>
 
-      </aside><!-- /sidebar -->
+      <!-- AI INSIGHT -->
+      <div class="ai-box" id="aiBox">
+        <div class="ai-box__head">
+          <span class="ai-label">🤖 AI Advisor</span>
+          <span id="aiModelo" class="muted-sm"></span>
+          <button id="btnAi" class="btn-ghost btn-sm">Consultar</button>
+        </div>
+        <div id="aiContent" class="ai-content">
+          <p class="muted-sm">Clique em "Consultar" para obter recomendação da IA.</p>
+        </div>
+      </div>
+    </section>
 
-      <!-- ── ÁREA PRINCIPAL ────────────────────────────────────── -->
-      <main class="workspace">
+    <!-- LINHA INFERIOR: TRADES RECENTES -->
+    <section class="card card-full">
+      <div class="card-head">
+        <h2>Trades recentes</h2>
+        <span id="totalTrades" class="muted-sm">0 trades</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>Hora</th><th>Par</th><th>Lado</th>
+            <th>Preço</th><th>Notional</th><th>PnL</th><th>PnL%</th>
+          </tr></thead>
+          <tbody id="tabelaTrades"><tr><td colspan="7" class="empty">Sem trades registrados.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
 
-        <!-- Barra superior com título e ações -->
-        <section class="toolbar">
-          <div class="toolbar__copy">
-            <p class="eyebrow">Operação</p>
-            <h2 id="tituloTela">Dashboard inicial</h2>
-            <p id="subtituloTela" class="muted">
-              Conta, mercado, modelos, comparativos e execução em uma única leitura.
-            </p>
-          </div>
-          <div class="toolbar__actions">
-            <button id="btnAtualizar" class="btn btn--secondary" type="button">↻ Atualizar</button>
-            <button id="btnSair" class="btn btn--ghost" type="button">Sair</button>
-          </div>
-        </section>
-
-        <!-- ══════════ ABA: DASHBOARD ══════════ -->
-        <section id="tab-dashboard" class="tab-view tab-view--active">
-
-          <!-- Linha 1: Cards de resumo -->
-          <div class="grid grid--summary">
-
-            <article class="panel panel--accent">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Sua conta</p>
-                  <h3>Saldo e posição</h3>
-                </div>
-                <span id="dashContaModo" class="badge badge--soft">--</span>
-              </div>
-              <div id="dashContaResumo" class="metric-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Mercado agora</p>
-                  <h3>Preço e indicadores</h3>
-                </div>
-                <span id="dashMercadoStatus" class="badge badge--soft">--</span>
-              </div>
-              <div id="dashMercadoResumo" class="metric-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Decisão da IA</p>
-                  <h3>O que o modelo está dizendo</h3>
-                </div>
-                <span id="dashAcaoAtual" class="badge badge--neutral">Aguardando</span>
-              </div>
-              <div id="dashModeloResumo" class="metric-list"></div>
-              <p id="dashModeloMotivo" class="muted" style="margin-top:12px;font-size:0.84rem">Sem justificativa recente.</p>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Resultado</p>
-                  <h3>Lucro &amp; prejuízo (PnL)</h3>
-                </div>
-                <span id="dashPnlStatus" class="badge badge--soft">--</span>
-              </div>
-              <div id="dashPnlResumo" class="metric-list"></div>
-            </article>
-
-          </div><!-- /grid summary -->
-
-          <!-- Linha 2: Gráficos -->
-          <div class="grid grid--charts">
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Gráfico de preço</p>
-                  <h3>Variação recente do mercado</h3>
-                </div>
-                <span class="badge badge--soft">Mercado</span>
-              </div>
-              <svg id="chartPrecos" viewBox="0 0 720 220" preserveAspectRatio="none"></svg>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Comparativo IA</p>
-                  <h3>Preço real vs. previsão do modelo</h3>
-                </div>
-                <span class="badge badge--soft">Modelo</span>
-              </div>
-              <svg id="chartComparativo" viewBox="0 0 720 220" preserveAspectRatio="none"></svg>
-            </article>
-
-          </div><!-- /grid charts -->
-
-          <!-- Linha 3: Taxas e oportunidades -->
-          <div class="grid grid--detail">
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Custos</p>
-                  <h3>Taxas e execução na Binance</h3>
-                </div>
-                <span class="badge badge--soft">Binance</span>
-              </div>
-              <div id="dashTaxasResumo" class="metric-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Scanner multiativo</p>
-                  <h3>Oportunidades detectadas agora</h3>
-                </div>
-                <span id="dashScannerStatus" class="badge badge--soft">--</span>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Par</th>
-                      <th>Sinal</th>
-                      <th>Lucro líq. esp.</th>
-                      <th>Score</th>
-                    </tr>
-                  </thead>
-                  <tbody id="tabelaOportunidades"></tbody>
-                </table>
-              </div>
-            </article>
-
-          </div><!-- /grid detail -->
-
-        </section><!-- /tab-dashboard -->
-
-        <!-- ══════════ ABA: BOT ══════════ -->
-        <section id="tab-bot" class="tab-view">
-
-          <!-- Controle e perfis -->
-          <div class="grid grid--bot">
-
-            <article class="panel panel--accent">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Controle do bot</p>
-                  <h3>Ligar, desligar e definir capital</h3>
-                </div>
-                <span id="botStatus" class="badge badge--neutral">Pausado</span>
-              </div>
-              <label class="field">
-                <span>Capital total do bot em USDT</span>
-                <input id="botCapitalInput" type="number" min="1" step="0.01" placeholder="Ex: 25.00" />
-              </label>
-              <div class="action-row">
-                <button id="botToggleBtn" class="btn btn--primary" type="button">Ligar bot</button>
-              </div>
-              <p id="botCapitalStatus" class="muted">
-                O bot divide esse capital automaticamente entre os 3 perfis: Mini, Ganancioso e Diário.
-              </p>
-              <div id="botResumo" class="metric-list" style="margin-top:14px"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Perfis de operação</p>
-                  <h3>Como o capital é dividido</h3>
-                </div>
-                <span class="badge badge--soft">50 / 25 / 25</span>
-              </div>
-              <p class="muted" style="margin-bottom:12px">
-                <strong>Mini</strong> busca micro-lucros rápidos (&gt; $0,01). <strong>Ganancioso</strong> busca lucros maiores (&gt; $0,50). <strong>Diário</strong> visa o maior ganho do dia (&gt; $1,00).
-              </p>
-              <div id="botPerfis" class="profile-grid"></div>
-            </article>
-
-          </div><!-- /grid bot -->
-
-          <!-- Ciclo e histórico -->
-          <div class="grid grid--detail">
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Ciclo atual</p>
-                  <h3>O que o bot está fazendo agora</h3>
-                </div>
-                <span id="botCicloStatus" class="badge badge--soft">--</span>
-              </div>
-              <div id="botCicloResumo" class="metric-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Histórico</p>
-                  <h3>Últimas ordens executadas</h3>
-                </div>
-                <span id="botTradesTotal" class="badge badge--soft">0 trades</span>
-              </div>
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Horário</th>
-                      <th>Lado</th>
-                      <th>Preço</th>
-                      <th>Valor</th>
-                      <th>Lucro líq.</th>
-                    </tr>
-                  </thead>
-                  <tbody id="tabelaBotTrades"></tbody>
-                </table>
-              </div>
-            </article>
-
-          </div><!-- /grid detail bot -->
-
-        </section><!-- /tab-bot -->
-
-        <!-- ══════════ ABA: NOTÍCIAS ══════════ -->
-        <section id="tab-noticias" class="tab-view">
-
-          <!-- Resumo e filtro por símbolo -->
-          <article class="panel panel--accent">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">Notícias por ativo</p>
-                <h3>Sentimento de mercado em tempo real</h3>
-              </div>
-              <span id="newsAtualizacao" class="badge badge--soft">Aguardando</span>
-            </div>
-            <p class="muted" style="margin-bottom:4px">
-              Selecione o ativo para ver as fontes monitoradas, o peso de cada uma e as manchetes mais recentes.
-            </p>
-            <div id="newsTabs" class="symbol-tabs"></div>
-            <div id="newsResumo" class="metric-list"></div>
-          </article>
-
-          <!-- Fontes e headlines -->
-          <div class="grid grid--detail">
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Fontes ranqueadas</p>
-                  <h3>Top 10 por confiabilidade</h3>
-                </div>
-                <span class="badge badge--soft">Peso por fonte</span>
-              </div>
-              <p class="muted" style="margin-bottom:12px;font-size:0.82rem">
-                O "peso" mostra o quanto cada fonte influencia a decisão da IA. Fontes com mais acertos históricos têm mais peso.
-              </p>
-              <div id="newsFontesPeso" class="source-list"></div>
-            </article>
-
-            <article class="panel">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Manchetes recentes</p>
-                  <h3>Notícias do ativo selecionado</h3>
-                </div>
-                <span id="newsHeadlinesTotal" class="badge badge--soft">0 itens</span>
-              </div>
-              <div id="newsHeadlines" class="headline-list"></div>
-            </article>
-
-          </div><!-- /grid detail noticias -->
-
-          <!-- Painéis iframe por fonte -->
-          <article class="panel">
-            <div class="section-head">
-              <div>
-                <p class="eyebrow">Painéis ao vivo</p>
-                <h3>Fontes monitoradas para o ativo atual</h3>
-              </div>
-              <span class="badge badge--soft">10 fontes</span>
-            </div>
-            <div id="newsFrames" class="iframe-grid"></div>
-          </article>
-
-        </section><!-- /tab-noticias -->
-
-      </main><!-- /workspace -->
-
-    </section><!-- /painelApp -->
-
-  </div><!-- /layout -->
-
-  <!-- ══ PARTICLE ANIMATION ════════════════════════════════════ -->
-  <script>
-  (function () {
-    const canvas = document.getElementById("particle-canvas");
-    const ctx = canvas.getContext("2d");
-    let W, H, particles, animId;
-
-    function resize() {
-      W = canvas.width  = window.innerWidth;
-      H = canvas.height = window.innerHeight;
-    }
-
-    function randomBetween(a, b) { return a + Math.random() * (b - a); }
-
-    function createParticle() {
-      const hue = Math.random() > 0.15 ? 195 : 210; // azul ciano vs azul puro
-      return {
-        x: randomBetween(0, W),
-        y: randomBetween(0, H),
-        r: randomBetween(0.6, 2.2),
-        vx: randomBetween(-0.15, 0.15),
-        vy: randomBetween(-0.25, -0.06),
-        alpha: randomBetween(0.1, 0.55),
-        fadeDir: Math.random() > 0.5 ? 1 : -1,
-        fadeSpeed: randomBetween(0.002, 0.006),
-        hue,
-        connected: false,
-      };
-    }
-
-    function initParticles(n) {
-      particles = Array.from({ length: n }, createParticle);
-    }
-
-    function draw() {
-      ctx.clearRect(0, 0, W, H);
-
-      // Linhas de conexão entre partículas próximas
-      const maxDist = 110;
-      for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const dx = particles[i].x - particles[j].x;
-          const dy = particles[i].y - particles[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < maxDist) {
-            const opacity = (1 - dist / maxDist) * 0.12;
-            ctx.beginPath();
-            ctx.strokeStyle = `rgba(0, 200, 255, ${opacity})`;
-            ctx.lineWidth = 0.5;
-            ctx.moveTo(particles[i].x, particles[i].y);
-            ctx.lineTo(particles[j].x, particles[j].y);
-            ctx.stroke();
-          }
-        }
-      }
-
-      // Partículas
-      for (const p of particles) {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `hsla(${p.hue}, 90%, 65%, ${p.alpha})`;
-        ctx.fill();
-
-        // Glow suave nas maiores
-        if (p.r > 1.5) {
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r * 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = `hsla(${p.hue}, 90%, 65%, ${p.alpha * 0.18})`;
-          ctx.fill();
-        }
-
-        // Movimento
-        p.x += p.vx;
-        p.y += p.vy;
-        p.alpha += p.fadeDir * p.fadeSpeed;
-
-        if (p.alpha <= 0.05 || p.alpha >= 0.6) p.fadeDir *= -1;
-        if (p.y < -10) p.y = H + 10;
-        if (p.x < -10) p.x = W + 10;
-        if (p.x > W + 10) p.x = -10;
-      }
-
-      animId = requestAnimationFrame(draw);
-    }
-
-    function getParticleCount() {
-      const area = window.innerWidth * window.innerHeight;
-      return Math.min(120, Math.max(40, Math.floor(area / 12000)));
-    }
-
-    resize();
-    initParticles(getParticleCount());
-    draw();
-
-    window.addEventListener("resize", () => {
-      cancelAnimationFrame(animId);
-      resize();
-      initParticles(getParticleCount());
-      draw();
-    });
-  })();
-  </script>
+  </main>
+</div>
 
 </body>
 </html>

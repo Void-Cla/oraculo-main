@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+
 from typing import Any
 
 from .config import ROTAS_TRIANGULARES
@@ -22,7 +22,7 @@ def avaliar_rotas_triangular(
 ) -> dict[str, Any]:
     rotas_saida: list[dict[str, Any]] = []
     # Default to 0.01 USDT for micro-trading profitability targets
-    lucro_minimo = max(0.0, float(os.getenv("LUCRO_LIQUIDO_MINIMO_USDT", "0.01") or 0.01))
+    lucro_minimo = 0.01  # hard floor $0.01 USDT
     notional = max(0.0, float(notional_inicial_usdt or 0.0))
 
     for rota in ROTAS_TRIANGULARES:

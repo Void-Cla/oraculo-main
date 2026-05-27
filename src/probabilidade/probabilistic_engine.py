@@ -22,12 +22,12 @@ class ProbabilisticTradeEngine:
         temperature: float | None = None,
         scale: float | None = None,
     ) -> None:
-        fee = float(fee if fee is not None else os.getenv("SIGNAL_TRADE_FEE_PCT", "0.0012"))
-        slippage = float(slippage if slippage is not None else os.getenv("SIGNAL_SLIPPAGE_PCT", "0.0005"))
-        min_ev = float(min_ev if min_ev is not None else os.getenv("SIGNAL_MIN_EV", "0.0008"))
-        min_prob = float(min_prob if min_prob is not None else os.getenv("SIGNAL_MIN_PROB", "0.58"))
-        temperature = float(temperature if temperature is not None else os.getenv("SIGNAL_PROB_TEMPERATURE", "1.0"))
-        scale = float(scale if scale is not None else os.getenv("SIGNAL_PROB_SCALE", "10.0"))
+        fee = float(fee if fee is not None else 0.001)
+        slippage = float(slippage if slippage is not None else 0.0005)
+        min_ev = float(min_ev if min_ev is not None else 0.0001)
+        min_prob = float(min_prob if min_prob is not None else 0.55)
+        temperature = float(temperature if temperature is not None else 1.0)
+        scale = float(scale if scale is not None else 10.0)
         self.calibrator = ProbabilityCalibrator(temperature=temperature, scale=scale)
         self.ev_calc = EVCalculator(fee=fee, slippage=slippage)
         self.selector = TradeSelector(min_ev=min_ev, min_prob=min_prob)

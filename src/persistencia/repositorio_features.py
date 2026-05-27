@@ -14,15 +14,21 @@ class RepositorioFeatures:
     @staticmethod
     async def salvar(ts: int, simbolo: str, features: dict[str, Any]) -> None:
         payload = json.dumps(features, ensure_ascii=False, sort_keys=True)
+        # Extrair regime e vol_regime para colunas indexadas (facilita queries ML)
+        regime = str(features.get("regime") or "")
+        vol_ref = max(float(features.get("vol5") or 0.0), float(features.get("vol10") or 0.0))
+        vol_regime = "HIGH" if vol_ref >= 0.012 else ("LOW" if vol_ref <= 0.003 else "MED")
         async with get_conexao() as conn:
             await conn.execute(
                 """
-                INSERT INTO features_1m (ts, simbolo, features_json)
-                VALUES (?, ?, ?)
+                INSERT INTO features_1m (ts, simbolo, features_json, regime, vol_regime)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(ts, simbolo) DO UPDATE SET
-                  features_json = excluded.features_json
+                  features_json = excluded.features_json,
+                  regime = excluded.regime,
+                  vol_regime = excluded.vol_regime
                 """,
-                (ts, simbolo.upper(), payload),
+                (ts, simbolo.upper(), payload, regime, vol_regime),
             )
             await conn.commit()
 

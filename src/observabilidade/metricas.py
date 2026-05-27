@@ -65,6 +65,13 @@ def exportar_metricas() -> bytes:
     return generate_latest()
 
 
+# Re-exportar para que main.py possa importar diretamente deste módulo
+try:
+    from prometheus_client import CONTENT_TYPE_LATEST as CONTENT_TYPE_LATEST  # noqa: F401
+except ImportError:
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"  # type: ignore[assignment]
+
+
 __all__ = [
     "CONTENT_TYPE_LATEST",
     "confianca_previsao",

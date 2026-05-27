@@ -33,13 +33,13 @@ def decidir(
     score_llm = float(llm.get("score_direcional", 0.0) or 0.0)
 
     ajustes_sinal = ajustes_sinal or {}
-    limiar_variacao = float(ajustes_sinal.get("limiar_variacao_numerica", os.getenv("LIMIAR_VARIACAO_NUMERICA", "0.0015")))
-    limiar_operacao = float(ajustes_sinal.get("limiar_score_operacao", os.getenv("LIMIAR_SCORE_OPERACAO", "0.18")))
-    max_spread = float(ajustes_sinal.get("max_spread_rel", os.getenv("MAX_SPREAD_REL", "0.003")))
-    max_vol = float(ajustes_sinal.get("max_vol5", os.getenv("MAX_VOL5", "0.02")))
-    max_posicao = float(ajustes_sinal.get("max_posicao_fracao", os.getenv("MAX_POSICAO_FRACAO", "0.05")))
-    peso_num_cfg = float(ajustes_sinal.get("peso_modelo_numerico", os.getenv("PESO_MODELO_NUMERICO", "0.65")))
-    peso_llm_cfg = float(ajustes_sinal.get("peso_modelo_llm", os.getenv("PESO_MODELO_LLM", "0.35")))
+    limiar_variacao = float(ajustes_sinal.get("limiar_variacao_numerica", 0.0015))
+    limiar_operacao = float(ajustes_sinal.get("limiar_score_operacao", 0.18))
+    max_spread = float(ajustes_sinal.get("max_spread_rel", 0.003))
+    max_vol = float(ajustes_sinal.get("max_vol5", 0.02))
+    max_posicao = float(ajustes_sinal.get("max_posicao_fracao", 0.05))
+    peso_num_cfg = float(ajustes_sinal.get("peso_modelo_numerico", 0.65))
+    peso_llm_cfg = float(ajustes_sinal.get("peso_modelo_llm", 0.35))
 
     score_numerico = _clamp(variacao_prevista / limiar_variacao, -1.0, 1.0)
     peso_num_real = max(conf_num, 0.0) * peso_num_cfg

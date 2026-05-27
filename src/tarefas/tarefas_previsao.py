@@ -21,8 +21,8 @@ from src.servicos.noticias import obter_noticias_para_peso
 LOG = get_logger("tarefas_previsao")
 
 _SYMBOLS = list(pares_monitorados())
-_INTERVALO = int(os.getenv("COLETOR_INTERVAL_SECONDS", "15"))
-_ATRASO_OUTCOME = int(os.getenv("ATRASO_OUTCOME_SEGUNDOS", "60"))
+_INTERVALO = 15          # segundos entre coletas — scalping
+_ATRASO_OUTCOME = 60     # segundos para registrar outcome
 
 
 def _klines_brutos_de_registros(registros: list[dict[str, Any]]) -> list[list[Any]]:

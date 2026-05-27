@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Any
 
@@ -223,6 +222,10 @@ async def montar_monitoramento_multiativo(
             precos_usdt=precos_usdt,
             capital_info=capital_info,
             perfil_taxas=perfil_taxas,
+            min_prob=float(ajustes_sinal.get("signal_min_prob", 0.55) or 0.55),
+            min_score=float(ajustes_sinal.get("limiar_score_operacao", 0.35) or 0.35),
+            slippage_pct=float(ajustes_sinal.get("signal_slippage_pct", 0.0005) or 0.0005),
+            max_spread_rel=float(ajustes_sinal.get("max_spread_rel", 0.003) or 0.003),
         )
         notional_arbitragem = float(capital_info.get("trade_referencia_usdt", 0.0) or 0.0)
         if saldos:
@@ -233,8 +236,8 @@ async def montar_monitoramento_multiativo(
         arbitragem = avaliar_rotas_triangular(
             snapshots,
             notional_inicial_usdt=notional_arbitragem,
-            taxa_por_perna=float(perfil_taxas.get("taker_decimal_efetiva", 0.0) or 0.0),
-            slippage_pct=float(os.getenv("SIGNAL_SLIPPAGE_PCT", "0.0005") or 0.0005),
+            taxa_por_perna=float(perfil_taxas.get("taker_decimal_efetiva", 0.001) or 0.001),
+            slippage_pct=float(ajustes_sinal.get("signal_slippage_pct", 0.0005) or 0.0005),
         )
         bnb_manager = avaliar_saldo_bnb(
             saldos=saldos,

@@ -15,8 +15,8 @@ LOG = get_logger("coletor_noticias")
 
 
 def simbolos_monitorados() -> List[str]:
-    s = os.getenv("SYMBOLS") or os.getenv("MONITORED_PAIRS") or ""
-    return [x.strip().upper() for x in s.split(",") if x.strip()]
+    from src.multiativo.config import pares_monitorados
+    return list(pares_monitorados())
 
 
 async def buscar_noticias_para_simbolo(simbolo: str) -> List[dict]:

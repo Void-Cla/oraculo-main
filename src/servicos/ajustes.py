@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.core.settings import env_float, env_int, env_str
 from src.persistencia.repositorio_config import RepositorioConfig
 from src.risco.risk_engine import config_risco_padrao
-
 
 _SINAL_CHAVES = {
     "peso_modelo_numerico",
@@ -42,258 +40,201 @@ def _clamp(valor: float, minimo: float, maximo: float) -> float:
     return max(minimo, min(maximo, valor))
 
 
+# Hardcoded — sem os.getenv
 def ajustes_sinal_padrao() -> dict[str, Any]:
     return {
-        "peso_modelo_numerico": env_float("PESO_MODELO_NUMERICO", 0.65, minimo=0.0),
-        "peso_modelo_llm": env_float("PESO_MODELO_LLM", 0.35, minimo=0.0),
-        "limiar_variacao_numerica": env_float("LIMIAR_VARIACAO_NUMERICA", 0.0015, minimo=0.0),
-        "limiar_score_operacao": env_float("LIMIAR_SCORE_OPERACAO", 0.18, minimo=0.0),
-        "max_spread_rel": env_float("MAX_SPREAD_REL", 0.003, minimo=0.0),
-        "max_vol5": env_float("MAX_VOL5", 0.02, minimo=0.0),
-        "max_posicao_fracao": env_float("MAX_POSICAO_FRACAO", 0.05, minimo=0.0),
-        "signal_trade_fee_pct": env_float("SIGNAL_TRADE_FEE_PCT", 0.0012),
-        "signal_slippage_pct": env_float("SIGNAL_SLIPPAGE_PCT", 0.0005),
-        "signal_min_net_profit_pct": env_float("SIGNAL_MIN_NET_PROFIT_PCT", 0.0045),
-        "signal_min_ev": env_float("SIGNAL_MIN_EV", 0.0020),
-        "signal_min_prob": env_float("SIGNAL_MIN_PROB", 0.62),
-        "signal_prob_temperature": env_float("SIGNAL_PROB_TEMPERATURE", 1.0, minimo=0.0),
-        "signal_prob_scale": env_float("SIGNAL_PROB_SCALE", 10.0, minimo=0.0),
-        "signal_confirm_threshold": env_int("SIGNAL_CONFIRMATION_THRESHOLD", 3, minimo=0),
-        "signal_decision_window_minutes": env_int("SIGNAL_DECISION_WINDOW_MINUTES", 20, minimo=0),
+        "peso_modelo_numerico":         0.65,
+        "peso_modelo_llm":              0.35,
+        "limiar_variacao_numerica":     0.0015,
+        "limiar_score_operacao":        0.18,
+        "max_spread_rel":               0.003,
+        "max_vol5":                     0.02,
+        "max_posicao_fracao":           0.05,
+        "signal_trade_fee_pct":         0.001,    # decimal — 0.1%
+        "signal_slippage_pct":          0.0005,   # decimal — 0.05%
+        "signal_min_net_profit_pct":    0.0005,   # 0.05% mínimo
+        "signal_min_ev":                0.0001,   # EV mínimo reduzido para micro-trading
+        "signal_min_prob":              0.55,
+        "signal_prob_temperature":      1.0,
+        "signal_prob_scale":            10.0,
+        "signal_confirm_threshold":     1,        # 1 confirmação — agressivo
+        "signal_decision_window_minutes": 5,
     }
 
 
 def ajustes_testnet_padrao() -> dict[str, Any]:
     return {
-        "simbolo": "BTCUSDT",
-        "intervalo_segundos": 30,
-        "notional_usdt": min(5.0, env_float("AUTO_MAX_NOTIONAL_USDT", 100.0, minimo=0.0)),
-        "lado_inicial": "BUY",
+        "simbolo":             "BTCUSDT",
+        "intervalo_segundos":  15,               # mais rápido — scalping
+        "notional_usdt":       10.0,
+        "lado_inicial":        "BUY",
     }
 
 
 def ajustes_retomada_padrao() -> dict[str, Any]:
     return {
-        "simbolo_principal": env_str("SIMBOLO_PRINCIPAL", "BTCUSDT").upper(),
-        "pausa_media_h": env_float("RETOMADA_PAUSA_MEDIA_H", 4.0, minimo=0.0),
-        "pausa_longa_h": env_float("RETOMADA_PAUSA_LONGA_H", 24.0, minimo=0.0),
-        "variacao_pct": env_float("RETOMADA_VARIACAO_PCT", 3.0, minimo=0.0),
-        "candles_observacao": env_int("RETOMADA_CANDLES_OBSERVACAO", 5, minimo=1),
-        "recalibracao_candles": env_int("RECALIBRACAO_CANDLES", 60, minimo=1),
-        "drift_volatilidade_threshold": env_float("DRIFT_VOLATILIDADE_THRESHOLD", 2.0, minimo=1.0),
-        "drift_janela_candles": env_int("DRIFT_JANELA_CANDLES", 30, minimo=2),
+        "simbolo_principal":         "BTCUSDT",
+        "pausa_media_h":             4.0,
+        "pausa_longa_h":             24.0,
+        "variacao_pct":              3.0,
+        "candles_observacao":        5,
+        "recalibracao_candles":      10,
+        "drift_volatilidade_threshold": 0.02,
+        "drift_janela_candles":      20,
     }
 
 
-def _normalizar_num(valor: Any) -> float | None:
-    try:
-        return float(valor)
-    except (TypeError, ValueError):
-        return None
+def _mesclar(base: dict, sobrescrever: dict, chaves: set) -> dict:
+    resultado = dict(base)
+    for chave, valor in sobrescrever.items():
+        if chave in chaves:
+            resultado[chave] = valor
+    return resultado
 
 
-def _normalizar_int(valor: Any) -> int | None:
-    try:
-        return int(valor)
-    except (TypeError, ValueError):
-        return None
-
-
-def normalizar_ajustes_sinal(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {}
-    saida: dict[str, Any] = {}
-    for chave in _SINAL_CHAVES:
-        if chave not in payload:
-            continue
-        valor = payload.get(chave)
-        if chave in {"signal_confirm_threshold", "signal_decision_window_minutes"}:
-            valor_int = _normalizar_int(valor)
-            if valor_int is not None:
-                saida[chave] = max(0, valor_int)
-            continue
-        valor_num = _normalizar_num(valor)
-        if valor_num is None:
-            continue
-        if chave in {"peso_modelo_numerico", "peso_modelo_llm"}:
-            saida[chave] = _clamp(valor_num, 0.0, 1.0)
-        elif chave in {"limiar_variacao_numerica", "limiar_score_operacao"}:
-            saida[chave] = max(0.0, valor_num)
-        elif chave in {"max_spread_rel", "max_vol5", "max_posicao_fracao"}:
-            saida[chave] = max(0.0, valor_num)
-        elif chave in {
-            "signal_trade_fee_pct",
-            "signal_slippage_pct",
-            "signal_min_net_profit_pct",
-            "signal_min_ev",
-            "signal_min_prob",
-            "signal_prob_temperature",
-            "signal_prob_scale",
-        }:
-            saida[chave] = valor_num
-        else:
-            saida[chave] = valor_num
-    return saida
-
-
-def normalizar_ajustes_risco(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {}
-    base = config_risco_padrao()
-    saida: dict[str, Any] = {}
-    for chave in base.keys():
-        if chave not in payload:
-            continue
-        valor = payload.get(chave)
-        if isinstance(base[chave], bool):
-            saida[chave] = bool(valor)
-            continue
-        if isinstance(base[chave], int):
-            valor_int = _normalizar_int(valor)
-            if valor_int is not None:
-                saida[chave] = valor_int
-            continue
-        valor_num = _normalizar_num(valor)
-        if valor_num is not None:
-            if chave == "filtro_ev_minimo_usdt":
-                saida[chave] = max(1.0, float(valor_num))
-            elif chave == "lucro_liquido_minimo":
-                saida[chave] = max(float(base[chave]), float(valor_num))
-            elif chave == "lucro_liquido_minimo_usdt":
-                saida[chave] = max(float(base[chave]), float(valor_num))
-            else:
-                saida[chave] = float(valor_num)
-    return saida
-
-
-def normalizar_ajustes_testnet(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {}
-    base = ajustes_testnet_padrao()
-    saida: dict[str, Any] = {}
-    simbolo = payload.get("simbolo")
-    if isinstance(simbolo, str) and simbolo:
-        saida["simbolo"] = simbolo.upper()
-    intervalo = _normalizar_int(payload.get("intervalo_segundos"))
-    if intervalo is not None:
-        saida["intervalo_segundos"] = max(5, intervalo)
-    notional = _normalizar_num(payload.get("notional_usdt"))
-    if notional is not None:
-        teto = env_float("AUTO_MAX_NOTIONAL_USDT", 100.0, minimo=0.0)
-        saida["notional_usdt"] = min(max(0.0, float(notional)), teto)
-    lado_inicial = payload.get("lado_inicial")
-    if isinstance(lado_inicial, str) and lado_inicial.upper() in {"BUY", "SELL"}:
-        saida["lado_inicial"] = lado_inicial.upper()
-    return saida
-
-
-def normalizar_ajustes_retomada(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {}
-    saida: dict[str, Any] = {}
-    simbolo = payload.get("simbolo_principal")
-    if isinstance(simbolo, str) and simbolo.strip():
-        saida["simbolo_principal"] = simbolo.strip().upper()
-
-    for chave in _RETOMADA_CHAVES - {"simbolo_principal", "candles_observacao", "recalibracao_candles", "drift_janela_candles"}:
-        if chave not in payload:
-            continue
-        valor_num = _normalizar_num(payload.get(chave))
-        if valor_num is not None:
-            saida[chave] = max(0.0, float(valor_num))
-
-    for chave in {"candles_observacao", "recalibracao_candles", "drift_janela_candles"}:
-        if chave not in payload:
-            continue
-        valor_int = _normalizar_int(payload.get(chave))
-        if valor_int is not None:
-            saida[chave] = max(1, valor_int)
-    if "drift_volatilidade_threshold" in saida:
-        saida["drift_volatilidade_threshold"] = max(1.0, float(saida["drift_volatilidade_threshold"]))
-    return saida
-
-
-def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    merged.update(override)
-    return merged
-
-
-async def obter_ajustes_sinal() -> dict[str, Any]:
+async def obter_ajustes_sinal(
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
     base = ajustes_sinal_padrao()
-    override_raw = await RepositorioConfig.obter("ajustes_sinal")
-    override = normalizar_ajustes_sinal(override_raw)
-    return {
-        "padrao": base,
-        "configurado": override,
-        "aplicado": _merge(base, override),
-    }
+    if repo and usuario_id:
+        try:
+            persistido = await repo.obter_config(usuario_id, "ajustes_sinal") or {}
+            base = _mesclar(base, persistido, _SINAL_CHAVES)
+        except Exception:
+            pass
+    return {"aplicado": base, "padrao": ajustes_sinal_padrao()}
 
 
-async def obter_ajustes_risco() -> dict[str, Any]:
-    base = config_risco_padrao()
-    override_raw = await RepositorioConfig.obter("ajustes_risco")
-    override = normalizar_ajustes_risco(override_raw)
-    return {
-        "padrao": base,
-        "configurado": override,
-        "aplicado": _merge(base, override),
-    }
-
-
-async def obter_ajustes_testnet() -> dict[str, Any]:
-    base = ajustes_testnet_padrao()
-    override_raw = await RepositorioConfig.obter("ajustes_testnet")
-    override = normalizar_ajustes_testnet(override_raw)
-    return {
-        "padrao": base,
-        "configurado": override,
-        "aplicado": _merge(base, override),
-    }
-
-
-async def obter_ajustes_retomada() -> dict[str, Any]:
+async def obter_ajustes_retomada(
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
     base = ajustes_retomada_padrao()
-    override_raw = await RepositorioConfig.obter("ajustes_retomada")
-    override = normalizar_ajustes_retomada(override_raw)
+    if repo and usuario_id:
+        try:
+            persistido = await repo.obter_config(usuario_id, "ajustes_retomada") or {}
+            base = _mesclar(base, persistido, _RETOMADA_CHAVES)
+        except Exception:
+            pass
+    return {"aplicado": base, "padrao": ajustes_retomada_padrao()}
+
+
+async def salvar_ajustes_sinal(
+    repo: RepositorioConfig,
+    usuario_id: str,
+    dados: dict[str, Any],
+) -> dict[str, Any]:
+    filtrado = {k: v for k, v in dados.items() if k in _SINAL_CHAVES}
+    await repo.salvar_config(usuario_id, "ajustes_sinal", filtrado)
+    return await obter_ajustes_sinal(repo, usuario_id)
+
+
+async def salvar_ajustes_retomada(
+    repo: RepositorioConfig,
+    usuario_id: str,
+    dados: dict[str, Any],
+) -> dict[str, Any]:
+    filtrado = {k: v for k, v in dados.items() if k in _RETOMADA_CHAVES}
+    await repo.salvar_config(usuario_id, "ajustes_retomada", filtrado)
+    return await obter_ajustes_retomada(repo, usuario_id)
+
+
+# ── Risco ──────────────────────────────────────────────────────────────────
+
+_RISCO_CHAVES = {
+    "risk_per_trade",
+    "max_drawdown",
+    "max_drawdown_diario",
+    "max_daily_loss_usdt",
+    "max_loss_trade_usdt",
+    "max_exposicao_ativo",
+    "max_trades_abertos",
+    "max_trades_por_hora",
+    "cooldown_minutos",
+    "bloquear_flip_flop",
+    "lucro_liquido_minimo",
+    "lucro_liquido_minimo_usdt",
+    "filtro_ev_minimo_usdt",
+    "binance_taxa_maker_pct",
+    "binance_taxa_taker_pct",
+    "slippage_pct",
+    "paper_trading",
+}
+
+
+def ajustes_risco_padrao() -> dict[str, Any]:
+    from src.risco.risk_engine import config_risco_padrao
+    return config_risco_padrao()
+
+
+async def obter_ajustes_risco(
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
+    base = ajustes_risco_padrao()
+    if repo and usuario_id:
+        try:
+            persistido = await repo.obter_config(usuario_id, "ajustes_risco") or {}
+            base = _mesclar(base, persistido, _RISCO_CHAVES)
+        except Exception:
+            pass
+    return {"aplicado": base, "padrao": ajustes_risco_padrao()}
+
+
+async def salvar_ajustes_risco(
+    dados: dict[str, Any],
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
+    filtrado = {k: v for k, v in dados.items() if k in _RISCO_CHAVES}
+    if repo and usuario_id:
+        await repo.salvar_config(usuario_id, "ajustes_risco", filtrado)
+    return await obter_ajustes_risco(repo, usuario_id)
+
+
+# ── Testnet ────────────────────────────────────────────────────────────────
+
+_TESTNET_CHAVES = {
+    "simbolo", "intervalo_segundos", "notional_usdt", "lado_inicial",
+}
+
+
+async def obter_ajustes_testnet(
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
+    base = ajustes_testnet_padrao()
+    if repo and usuario_id:
+        try:
+            persistido = await repo.obter_config(usuario_id, "ajustes_testnet") or {}
+            base = _mesclar(base, persistido, _TESTNET_CHAVES)
+        except Exception:
+            pass
+    return {"aplicado": base, "padrao": ajustes_testnet_padrao()}
+
+
+async def salvar_ajustes_testnet(
+    dados: dict[str, Any],
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
+    filtrado = {k: v for k, v in dados.items() if k in _TESTNET_CHAVES}
+    if repo and usuario_id:
+        await repo.salvar_config(usuario_id, "ajustes_testnet", filtrado)
+    return await obter_ajustes_testnet(repo, usuario_id)
+
+
+# ── Bootstrap ──────────────────────────────────────────────────────────────
+
+async def garantir_ajustes_padrao(
+    repo: RepositorioConfig | None = None,
+    usuario_id: str | None = None,
+) -> dict[str, Any]:
+    """Garante que todos os ajustes estão persistidos com valores padrão."""
     return {
-        "padrao": base,
-        "configurado": override,
-        "aplicado": _merge(base, override),
+        "sinal":    await obter_ajustes_sinal(repo, usuario_id),
+        "risco":    await obter_ajustes_risco(repo, usuario_id),
+        "testnet":  await obter_ajustes_testnet(repo, usuario_id),
+        "retomada": await obter_ajustes_retomada(repo, usuario_id),
     }
-
-
-async def salvar_ajustes_sinal(payload: Any) -> dict[str, Any]:
-    override = normalizar_ajustes_sinal(payload)
-    await RepositorioConfig.definir("ajustes_sinal", override)
-    return await obter_ajustes_sinal()
-
-
-async def salvar_ajustes_risco(payload: Any) -> dict[str, Any]:
-    override = normalizar_ajustes_risco(payload)
-    await RepositorioConfig.definir("ajustes_risco", override)
-    return await obter_ajustes_risco()
-
-
-async def salvar_ajustes_testnet(payload: Any) -> dict[str, Any]:
-    override = normalizar_ajustes_testnet(payload)
-    await RepositorioConfig.definir("ajustes_testnet", override)
-    return await obter_ajustes_testnet()
-
-
-async def salvar_ajustes_retomada(payload: Any) -> dict[str, Any]:
-    override = normalizar_ajustes_retomada(payload)
-    await RepositorioConfig.definir("ajustes_retomada", override)
-    return await obter_ajustes_retomada()
-
-
-async def garantir_ajustes_padrao() -> None:
-    defaults = {
-        "ajustes_sinal": ajustes_sinal_padrao(),
-        "ajustes_risco": config_risco_padrao(),
-        "ajustes_testnet": ajustes_testnet_padrao(),
-        "ajustes_retomada": ajustes_retomada_padrao(),
-    }
-    for chave, valor in defaults.items():
-        if await RepositorioConfig.obter(chave) is None:
-            await RepositorioConfig.definir(chave, valor)

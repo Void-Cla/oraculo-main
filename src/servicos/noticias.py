@@ -125,27 +125,23 @@ def _hoje_utc() -> str:
 
 
 def _max_buscas_dia() -> int:
-    try:
-        valor = int(os.getenv("NEWS_MAX_FETCHES_PER_DAY", "5") or 5)
-    except ValueError:
-        valor = 5
-    return valor if valor > 0 else 5
+    return 5
 
 
 def _min_fontes() -> int:
-    return max(10, int(os.getenv("NEWS_MIN_TRUSTED_SOURCES", "10") or 10))
+    return 10
 
 
 def _min_refresh_minutos() -> int:
-    return max(1, int(os.getenv("NEWS_MIN_REFRESH_MINUTES", "240") or 240))
+    return 240
 
 
 def _itens_por_fonte() -> int:
-    return max(1, min(5, int(os.getenv("NEWS_ARTICLES_PER_SOURCE", "3") or 3)))
+    return 3
 
 
 def _limite_total_itens() -> int:
-    return max(20, int(os.getenv("NEWS_MAX_TOTAL_ITEMS", "60") or 60))
+    return 60
 
 
 def _chave_cache(simbolo: str) -> str:
@@ -440,7 +436,7 @@ def _heuristica_sentimento(item: dict[str, Any]) -> tuple[float, list[str]]:
 
 
 def _modelo_llm() -> str:
-    return os.getenv("MODELO_LLM", "gpt-5.4").strip() or "gpt-5.4"
+    return "gpt-4o-mini"
 
 
 def _extrair_output_text(resposta: dict[str, Any]) -> str:
@@ -507,9 +503,9 @@ async def _llm_permitido() -> tuple[bool, str]:
     chamadas = int(estado.get("chamadas", 0))
     falhas = int(estado.get("falhas", 0))
     ultima_falha = int(estado.get("ultima_falha_ts", 0) or 0)
-    limite_diario = max(1, int(os.getenv("NEWS_LLM_DAILY_LIMIT", "20") or 20))
-    max_falhas = max(1, int(os.getenv("NEWS_LLM_MAX_ERRORS", "5") or 5))
-    cooldown_min = max(1, int(os.getenv("NEWS_LLM_COOLDOWN_MINUTES", "60") or 60))
+    limite_diario = 20
+    max_falhas = 5
+    cooldown_min = 60
     if chamadas >= limite_diario:
         return False, "limite_diario"
     if falhas >= max_falhas and (_agora_ms() - ultima_falha) < (cooldown_min * 60 * 1000):
@@ -565,7 +561,7 @@ async def _classificar_com_openai(itens: list[dict[str, Any]], simbolo: str) -> 
 
     corpo = {
         "model": modelo,
-        "reasoning": {"effort": os.getenv("OPENAI_REASONING_EFFORT", "low")},
+        "reasoning": {"effort": "low"},
         "input": [
             {
                 "role": "system",
@@ -588,7 +584,7 @@ async def _classificar_com_openai(itens: list[dict[str, Any]], simbolo: str) -> 
     }
 
     # Retries exponenciais simples
-    retries = max(0, int(os.getenv("NEWS_LLM_RETRIES", "2") or 2))
+    retries = 2
     delay_base = 0.8
     ultimo_erro: Exception | None = None
     for tentativa in range(retries + 1):
@@ -671,7 +667,7 @@ def _merge_classificacao(
 
 async def _coletar_noticias_fontes(simbolo: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     fontes_confiaveis = _fontes_confiaveis_normalizadas()
-    timeout = aiohttp.ClientTimeout(total=float(os.getenv("NEWS_HTTP_TIMEOUT_SECONDS", "8") or 8))
+    timeout = aiohttp.ClientTimeout(total=8.0)
     connector = aiohttp.TCPConnector(limit=12)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         tarefas = [_baixar_feed(session, fonte, simbolo) for fonte in fontes_confiaveis[: max(_min_fontes(), len(fontes_confiaveis))]]

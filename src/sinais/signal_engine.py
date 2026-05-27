@@ -169,7 +169,7 @@ def gerar_sinal_orquestrado(
     features = calcular_features_1m(klines, livro_topo=livro_topo, sent_score=sent_score)
     regime_info = detectar_regime(features)
     contexto = _contexto_mercado(klines)
-    limiar_confirmacao = int(ajustes_sinal.get("signal_confirm_threshold", os.getenv("SIGNAL_CONFIRMATION_THRESHOLD", "3")))
+    limiar_confirmacao = int(ajustes_sinal.get("signal_confirm_threshold", 1))
     confirmacao = _confirmacao_multi_timeframe(klines, limiar_confirmacao)
     previsao = preditor_end_to_end(
         simbolo=simbolo,
@@ -193,13 +193,13 @@ def gerar_sinal_orquestrado(
     variacao_prevista = float(previsao["decisao"].get("variacao_prevista", 0.0) or 0.0)
     movimento_previsto = abs(variacao_prevista)
     spread_rel = abs(float(features.get("spread_rel", 0.0) or 0.0))
-    taxa_trade = float(ajustes_sinal.get("signal_trade_fee_pct", os.getenv("SIGNAL_TRADE_FEE_PCT", "0.0012")))
-    slippage = float(ajustes_sinal.get("signal_slippage_pct", os.getenv("SIGNAL_SLIPPAGE_PCT", "0.0005")))
-    lucro_liquido_min = float(ajustes_sinal.get("signal_min_net_profit_pct", os.getenv("SIGNAL_MIN_NET_PROFIT_PCT", "0.002")))
-    signal_min_ev = float(ajustes_sinal.get("signal_min_ev", os.getenv("SIGNAL_MIN_EV", "0.0008")))
-    signal_min_prob = float(ajustes_sinal.get("signal_min_prob", os.getenv("SIGNAL_MIN_PROB", "0.58")))
-    signal_prob_temperature = float(ajustes_sinal.get("signal_prob_temperature", os.getenv("SIGNAL_PROB_TEMPERATURE", "1.0")))
-    signal_prob_scale = float(ajustes_sinal.get("signal_prob_scale", os.getenv("SIGNAL_PROB_SCALE", "10.0")))
+    taxa_trade = float(ajustes_sinal.get("signal_trade_fee_pct", 0.001))
+    slippage = float(ajustes_sinal.get("signal_slippage_pct", 0.0005))
+    lucro_liquido_min = float(ajustes_sinal.get("signal_min_net_profit_pct", 0.0005))
+    signal_min_ev = float(ajustes_sinal.get("signal_min_ev", 0.0001))
+    signal_min_prob = float(ajustes_sinal.get("signal_min_prob", 0.55))
+    signal_prob_temperature = float(ajustes_sinal.get("signal_prob_temperature", 1.0))
+    signal_prob_scale = float(ajustes_sinal.get("signal_prob_scale", 10.0))
 
     pte = ProbabilisticTradeEngine(
         fee=taxa_trade,
@@ -209,10 +209,9 @@ def gerar_sinal_orquestrado(
         temperature=signal_prob_temperature,
         scale=signal_prob_scale,
     )
-    force_allow_env = os.getenv("FORCE_ALLOW_RISKY_TRADES", "false").lower() == "true"
-    force_allow = bool(force_allow_env and force_allow_for_testnet is True)
+    force_allow = bool(force_allow_for_testnet is True)
     if force_allow:
-        lucro_liquido_min = float(os.getenv("SIGNAL_MIN_NET_PROFIT_PCT_TESTNET", "-1.0"))
+        lucro_liquido_min = -1.0
 
     pte_resultado = pte.evaluate_trade(
         raw_prediction=((float(previsao["y_cal"]) - close) / close),
@@ -254,7 +253,7 @@ def gerar_sinal_orquestrado(
     sinal["movimento_previsto_pct"] = movimento_previsto
     sinal["custos_estimados_pct"] = custos_totais
     sinal["lucro_liquido_esperado_pct"] = lucro_liquido_esperado
-    janela_minutos = int(ajustes_sinal.get("signal_decision_window_minutes", os.getenv("SIGNAL_DECISION_WINDOW_MINUTES", "20")))
+    janela_minutos = int(ajustes_sinal.get("signal_decision_window_minutes", 5))
     sinal["janela_decisao"] = _janela_decisao(int(features.get("ts", sinal["ts"]) or sinal["ts"]), janela_minutos)
     sinal["features"] = features
     sinal["previsao_modelo"] = {

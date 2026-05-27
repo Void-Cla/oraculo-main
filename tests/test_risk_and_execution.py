@@ -115,6 +115,30 @@ def test_risk_engine_preserva_ev_liquido_quando_aprovado():
     assert aprovacao["ev_liquido_usdt"] >= 1.0
 
 
+def test_risk_engine_testnet_nao_forca_piso_ev_de_conta_real():
+    usuario = _usuario()
+    usuario["risk_config"] = {
+        **usuario["risk_config"],
+        "risk_per_trade": 0.05,
+        "max_exposicao_ativo": 1.0,
+        "max_loss_trade_usdt": 10.0,
+        "lucro_liquido_minimo": 0.0,
+        "lucro_liquido_minimo_usdt": 0.0,
+        "filtro_ev_minimo_usdt": 0.001,
+    }
+
+    aprovacao = avaliar_sinal_para_usuario(
+        usuario=usuario,
+        sinal=_sinal_base(),
+        saldo={"saldo_total": 10.0, "saldo_livre": 10.0},
+        estado_execucao={},
+    )
+
+    assert aprovacao["aprovado"] is True
+    assert 0.001 <= aprovacao["ev_liquido_usdt"] < 1.0
+    assert aprovacao["risk_config_aplicado"]["modo_testnet"] is True
+
+
 def test_risk_engine_testnet_nao_remove_minimo_de_lucro():
     usuario = _usuario()
     usuario["risk_config"] = {

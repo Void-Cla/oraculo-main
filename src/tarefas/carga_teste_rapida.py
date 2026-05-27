@@ -47,7 +47,7 @@ async def executar_carga_testes() -> None:
     LOG.info("carga_teste_iniciada", extra={"usuario_id": usuario_id, "total": total, "intervalo": intervalo})
     try:
         force_always = str(os.getenv("CARGA_TESTE_FORCE_ALWAYS_TRADE", "false")).lower() == "true"
-        force_simulated = str(os.getenv("FORCE_SIMULATED_TESTNET", "false")).lower() == "true"
+        force_simulated = False
         while contador < total:
             simbolo = simbolos[contador % len(simbolos)]
             # Gerar sinal orquestrado simples
@@ -92,7 +92,7 @@ async def executar_carga_testes() -> None:
                         livro_topo=None,
                         noticias=[],
                         saldo=saldo_fornecido,
-                        force_allow_for_testnet=(bool(usuario.get("testnet", False)) and os.getenv("FORCE_ALLOW_RISKY_TRADES", "false").lower() == "true"),
+                        force_allow_for_testnet=(bool(usuario.get("testnet", False))),
                     )
             except Exception as exc:
                 LOG.warning("falha_gerar_sinal", extra={"erro": str(exc), "simbolo": simbolo})

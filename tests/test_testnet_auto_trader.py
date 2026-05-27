@@ -124,7 +124,47 @@ def test_saida_ciclo_nao_aciona_stop_apenas_por_custos_operacionais():
     assert resultado["motivo"] == "aguardando_lucro_minimo_liquido"
 
 
-def test_saida_ciclo_aciona_stop_por_movimento_bruto_adverso():
+def test_saida_ciclo_bloqueia_stop_com_prejuizo_por_padrao(monkeypatch):
+    monkeypatch.setenv("AUTO_PERMITIR_STOP_COM_PREJUIZO", "false")
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
+    state.update(
+        {
+            "ciclo_ativo": True,
+            "ciclo_quantidade": 0.01,
+            "ciclo_preco_entrada": 10000.0,
+            "ciclo_notional_entrada": 100.0,
+            "ciclo_iniciado_ts": 1,
+            "ciclo_preco_pico": 10000.0,
+        }
+    )
+    sinal = SignalDecision.from_mapping(
+        {
+            "simbolo": "BTCUSDT",
+            "acao": "HOLD",
+            "ts": 2,
+            "confianca": 0.7,
+            "stop_loss_pct": 0.002,
+            "take_profit_pct": 0.01,
+            "lucro_liquido_esperado_pct": 0.0,
+            "features": {"close": 9970.0, "spread_rel": 0.0},
+        }
+    )
+
+    resultado = _avaliar_saida_ciclo(
+        state=state,
+        sinal=sinal,
+        ajustes_sinal={"signal_trade_fee_pct": 0.0012, "signal_slippage_pct": 0.0005},
+        saldo_base=0.01,
+        preco_atual=9970.0,
+        perfil={"stop_protecao_pct": 0.002},
+    )
+
+    assert resultado["vender"] is False
+    assert resultado["motivo"] == "prejuizo_liquido_bloqueado"
+
+
+def test_saida_ciclo_permite_stop_com_prejuizo_somente_por_flag(monkeypatch):
+    monkeypatch.setenv("AUTO_PERMITIR_STOP_COM_PREJUIZO", "true")
     state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
     state.update(
         {
@@ -169,7 +209,7 @@ def test_estado_limita_notional_operacional(monkeypatch):
     assert state["notional_usdt"] == 100.0
 
 
-def test_usuario_virtual_nao_relaxa_risco_configurado():
+def test_usuario_virtual_preserva_freios_e_calibra_pisos_testnet():
     usuario = _usuario_virtual(
         {
             "max_trades_abertos": 3,
@@ -179,6 +219,9 @@ def test_usuario_virtual_nao_relaxa_risco_configurado():
             "max_exposicao_ativo": 1.0,
             "risk_per_trade": 1.0,
             "max_loss_trade_usdt": 1000.0,
+            "lucro_liquido_minimo": 0.005,
+            "lucro_liquido_minimo_usdt": 1.0,
+            "filtro_ev_minimo_usdt": 2.0,
             "paper_trading": True,
         },
         modo_testnet=True,
@@ -192,6 +235,10 @@ def test_usuario_virtual_nao_relaxa_risco_configurado():
     assert risco["max_exposicao_ativo"] == 0.20
     assert risco["risk_per_trade"] == 0.005
     assert risco["max_loss_trade_usdt"] == 0.20
+    assert risco["lucro_liquido_minimo"] == pytest.approx(0.0002)
+    assert risco["lucro_liquido_minimo_usdt"] == pytest.approx(0.001)
+    assert risco["filtro_ev_minimo_usdt"] == pytest.approx(0.001)
+    assert risco["modo_testnet"] is True
 
 
 def test_aplicar_teto_revalida_ev_apos_reducao_de_notional():
@@ -1417,7 +1464,7 @@ async def test_auto_trader_libera_saida_de_ciclo_mesmo_com_risco_bloqueando(monk
             "stop_loss_pct": 0.01,
             "take_profit_pct": 0.03,
             "lucro_liquido_esperado_pct": 0.03,
-            "features": {"close": 50000.0},
+            "features": {"close": 50500.0, "spread_rel": 0.0},
             "motivo": "saida_otimizada",
         },
     )
@@ -1451,7 +1498,7 @@ async def test_auto_trader_libera_saida_de_ciclo_mesmo_com_risco_bloqueando(monk
         token=token,
         sessao={"modo_testnet": True},
         cliente_conta=_ClienteContaFalso(saldo_usdt=0.0, saldo_base=0.001),
-        cliente_mercado=_ClienteMercadoFalso(),
+        cliente_mercado=_ClienteMercadoFalso(precos={"BTCUSDT": 50500.0}),
         ger=ger,
     )
 
@@ -1459,6 +1506,97 @@ async def test_auto_trader_libera_saida_de_ciclo_mesmo_com_risco_bloqueando(monk
     assert ger.ordens[0]["side"] == "SELL"
     assert trader._state[token]["ciclo_ativo"] is False
     assert trader._state[token]["ultima_acao"] == "SELL"
+
+
+@pytest.mark.asyncio
+async def test_auto_trader_bloqueia_sell_de_ciclo_sem_lucro_liquido(monkeypatch):
+    trader = TraderAutoTestnet()
+    token = "sell_sem_lucro"
+    trader._state[token] = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 25})
+    trader._state[token].update(
+        {
+            "sequencia_ciclo": 1,
+            "ciclo_id": 1,
+            "ciclo_ativo": True,
+            "estado_ciclo": "EM_POSICAO",
+            "ciclo_origem": "auto",
+            "ciclo_iniciado_ts": 1,
+            "ciclo_quantidade": 0.001,
+            "ciclo_preco_entrada": 50000.0,
+            "ciclo_notional_entrada": 50.0,
+        }
+    )
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _ajustes(*args, **kwargs):
+        return {"aplicado": {}}
+
+    async def _klines(*args, **kwargs):
+        return [{"ts": 1, "open": 49950, "high": 50000, "low": 49800, "close": 49900, "volume": 100}]
+
+    async def _livro(*args, **kwargs):
+        return {"bid_price": 49899.0, "ask_price": 49901.0, "bid_qty": 1.0, "ask_qty": 1.0}
+
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.coletar_e_persistir", _noop)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioOhlcv.obter_ultimas", _klines)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioLivroTopo.obter_ultimo", _livro)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_noticias_para_peso", lambda simbolo="BTCUSDT": _ajustes())
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_sinal", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_risco", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
+        lambda **kwargs: {
+            "simbolo": "BTCUSDT",
+            "acao": "SELL",
+            "ts": 1,
+            "confianca": 0.95,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.03,
+            "features": {"close": 49900.0, "spread_rel": 0.0},
+            "motivo": "saida_sugerida_sem_lucro_real",
+        },
+    )
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
+        lambda **kwargs: {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "SELL",
+            "aprovado": True,
+            "motivos": [],
+            "fracao_capital": 0.02,
+            "notional_sugerido": 50.0,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.03,
+            "lucro_liquido_esperado_usdt": 1.5,
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "janela_decisao": {"executar_apos_ts": 0},
+            "paper_trading": False,
+            "risk_config_aplicado": {},
+        },
+    )
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioAuditoria.registrar", _noop)
+
+    ger = _GerenciadorOrdensFalso()
+    await trader._executar_ciclo(
+        token=token,
+        sessao={"modo_testnet": True},
+        cliente_conta=_ClienteContaFalso(saldo_usdt=0.0, saldo_base=0.001),
+        cliente_mercado=_ClienteMercadoFalso(precos={"BTCUSDT": 49900.0}),
+        ger=ger,
+    )
+
+    assert ger.ordens == []
+    assert trader._state[token]["ciclo_ativo"] is True
+    assert trader._state[token]["ultima_acao"] == "HOLD"
+    assert trader._state[token]["ultimo_motivo"] == "aguardando_lucro_minimo_liquido"
 
 
 @pytest.mark.asyncio
@@ -1611,6 +1749,28 @@ def test_ajustes_microtrading_auto_calibram_lucro_e_filtros_por_capital():
     assert ajustes["limiar_variacao_numerica"] == pytest.approx(0.0018)
     assert ajustes["signal_min_ev"] == pytest.approx(0.0008)
     assert ajustes["signal_min_prob"] == pytest.approx(0.58)
+
+
+def test_ajustes_microtrading_auto_capa_overrides_altos_no_testnet():
+    ajustes = _ajustes_microtrading_auto(
+        {
+            "signal_min_net_profit_pct": 0.006,
+            "signal_confirm_threshold": 3,
+            "signal_decision_window_minutes": 20,
+            "limiar_score_operacao": 0.45,
+            "limiar_variacao_numerica": 0.003,
+            "signal_min_ev": 0.004,
+            "signal_min_prob": 0.68,
+        },
+        notional_usdt=100.0,
+        lucro_liquido_minimo_usdt=1.0,
+        modo_testnet=True,
+    )
+
+    assert ajustes["auto_lucro_liquido_minimo_usdt"] == pytest.approx(0.001)
+    assert ajustes["signal_min_net_profit_pct"] == pytest.approx(0.0004)
+    assert ajustes["signal_min_ev"] == pytest.approx(0.0008)
+    assert ajustes["signal_min_prob"] == pytest.approx(0.62)
 
 
 @pytest.mark.asyncio
@@ -2127,8 +2287,9 @@ async def test_auto_trader_flat_apos_ultima_venda_ignora_sinal_de_venda(monkeypa
     )
 
     assert ger.ordens == []
-    assert trader._state[token]["ultima_acao"] == "PAUSADO"
-    assert trader._state[token]["ultimo_motivo"] == "pnl_fifo_incompleto"
+    assert trader._state[token]["ultima_acao"] == "HOLD"
+    assert trader._state[token]["pnl_alerta_motivo"] == "pnl_fifo_incompleto"
+    assert trader._state[token]["ultimo_motivo"] == "proxima_acao_esperada_e_compra"
 
 
 @pytest.mark.asyncio

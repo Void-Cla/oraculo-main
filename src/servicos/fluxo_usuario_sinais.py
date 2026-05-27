@@ -171,18 +171,27 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
             simbolo=simbolo,
             meta={"ordem_id": ordem_id, "ev_liquido_usdt": aprovacao.get("ev_liquido_usdt", 0.0), "acao": aprovacao["acao"]},
         )
-        if publicar_fila:
-            await fila_sinais_global.publicar(
-                {
-                    "usuario_id": usuario_id,
-                    "usuario_nome": usuario["nome"],
-                    "simbolo": simbolo,
-                    "sinal": sinal,
-                    "aprovacao_risco": aprovacao,
-                    "plano_execucao": plano_execucao,
-                    "ordem_id": ordem_id,
-                }
-            )
+        if publicar_fila and ordem_id is not None:
+            try:
+                await fila_sinais_global.publicar(
+                    {
+                        "usuario_id": usuario_id,
+                        "usuario_nome": usuario["nome"],
+                        "simbolo": simbolo,
+                        "sinal": sinal,
+                        "aprovacao_risco": aprovacao,
+                        "plano_execucao": plano_execucao,
+                        "ordem_id": ordem_id,
+                    }
+                )
+                logger.info(f"Sinal publicado na fila com sucesso: ordem_id={ordem_id}")
+            except Exception as e:
+                logger.error(f"Erro ao publicar sinal na fila: {e}", exc_info=True)
+                raise
+        elif not publicar_fila:
+            logger.warning(f"Publicação na fila desativada para ordem_id={ordem_id}")
+        elif ordem_id is None:
+            logger.error("Falha ao publicar na fila: ordem_id é None")
     elif acao_registravel != "HOLD":
         ordem_id = await RepositorioOrdens.criar(
             usuario_id=usuario_id,
@@ -230,18 +239,23 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
             simbolo=simbolo,
             meta={"ordem_id": ordem_id, "ev_liquido_usdt": aprovacao.get("ev_liquido_usdt", 0.0), "acao": acao_registravel},
         )
-        if publicar_fila:
-            await fila_sinais_global.publicar(
-                {
-                    "usuario_id": usuario_id,
-                    "usuario_nome": usuario["nome"],
-                    "simbolo": simbolo,
-                    "sinal": sinal,
-                    "aprovacao_risco": aprovacao,
-                    "plano_execucao": plano_execucao,
-                    "ordem_id": ordem_id,
-                }
-            )
+        if publicar_fila and ordem_id is not None:
+            try:
+                await fila_sinais_global.publicar(
+                    {
+                        "usuario_id": usuario_id,
+                        "usuario_nome": usuario["nome"],
+                        "simbolo": simbolo,
+                        "sinal": sinal,
+                        "aprovacao_risco": aprovacao,
+                        "plano_execucao": plano_execucao,
+                        "ordem_id": ordem_id,
+                    }
+                )
+                logger.info(f"Sinal publicado na fila com sucesso: ordem_id={ordem_id}")
+            except Exception as e:
+                logger.error(f"Erro ao publicar sinal na fila: {e}", exc_info=True)
+                raise
 
     await RepositorioAuditoria.registrar(
         simbolo=simbolo,

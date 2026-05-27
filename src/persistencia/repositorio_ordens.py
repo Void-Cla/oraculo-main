@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -14,6 +15,8 @@ _STATUS_VALIDOS = {
     "REJEITADA",
     "SIMULADA",
 }
+
+logger = logging.getLogger("RepositorioOrdens")
 
 
 class RepositorioOrdens:
@@ -42,33 +45,39 @@ class RepositorioOrdens:
 
         timestamp = int(time.time() * 1000)
         payload = json.dumps(detalhe or {}, ensure_ascii=False, sort_keys=True)
-        async with get_conexao() as conn:
-            cursor = await conn.execute(
-                """
-                INSERT INTO ordens (
-                  created_ts, updated_ts, usuario_id, simbolo, lado, status, modo,
-                  preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct, detalhe_json
+        try:
+            async with get_conexao() as conn:
+                cursor = await conn.execute(
+                    """
+                    INSERT INTO ordens (
+                      created_ts, updated_ts, usuario_id, simbolo, lado, status, modo,
+                      preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct, detalhe_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp,
+                        timestamp,
+                        usuario_id,
+                        simbolo.upper(),
+                        lado.upper(),
+                        status,
+                        modo.lower(),
+                        preco_referencia,
+                        quantidade,
+                        notional,
+                        stop_loss_pct,
+                        take_profit_pct,
+                        payload,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    timestamp,
-                    timestamp,
-                    usuario_id,
-                    simbolo.upper(),
-                    lado.upper(),
-                    status,
-                    modo.lower(),
-                    preco_referencia,
-                    quantidade,
-                    notional,
-                    stop_loss_pct,
-                    take_profit_pct,
-                    payload,
-                ),
-            )
-            await conn.commit()
-            return int(cursor.lastrowid)
+                await conn.commit()
+                ordem_id = int(cursor.lastrowid)
+                logger.info(f"Ordem criada com sucesso: {ordem_id}")
+                return ordem_id
+        except Exception as e:
+            logger.error(f"Erro ao criar ordem: {e}", exc_info=True)
+            raise
 
     @staticmethod
     async def obter(ordem_id: int) -> dict[str, Any] | None:
@@ -166,3 +175,41 @@ class RepositorioOrdens:
         for ordem in ordens:
             resumo[ordem["status"].lower()] = resumo.get(ordem["status"].lower(), 0) + 1
         return resumo
+
+    @staticmethod
+    async def registrar_resultado(
+        ordem_id: int,
+        *,
+        lucro_usdt: float,
+        lucro_pct: float,
+        duracao_ms: int,
+        capital_pct_usado: float | None = None,
+        regime: str | None = None,
+        estrategia: str | None = None,
+    ) -> None:
+        """Persiste resultado financeiro de uma ordem encerrada."""
+        async with get_conexao() as conn:
+            await conn.execute(
+                """
+                UPDATE ordens
+                SET lucro_usdt = ?,
+                    lucro_pct = ?,
+                    duracao_ms = ?,
+                    capital_pct_usado = ?,
+                    regime = ?,
+                    estrategia = ?,
+                    updated_ts = ?
+                WHERE id = ?
+                """,
+                (
+                    float(lucro_usdt),
+                    float(lucro_pct),
+                    int(duracao_ms),
+                    float(capital_pct_usado) if capital_pct_usado is not None else None,
+                    str(regime) if regime else None,
+                    str(estrategia) if estrategia else None,
+                    int(time.time() * 1000),
+                    ordem_id,
+                ),
+            )
+            await conn.commit()

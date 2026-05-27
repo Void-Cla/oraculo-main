@@ -115,5 +115,5 @@ def analisar_contexto(
         "sentimento_noticias": sentimento_noticias,
         "tags": sorted(set(tags)),
         "fonte": fonte_analise,
-        "modelo_llm": os.getenv("MODELO_LLM", "gpt-5.4"),
+        "modelo_llm": "gpt-4o-mini",
     }

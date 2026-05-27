@@ -425,6 +425,41 @@ def test_trading_manual_respeita_bloqueio_operacional(tmp_path, monkeypatch):
     assert resposta.json()["detail"] == "retomada_operacoes_bloqueadas"
 
 
+def test_auto_bot_bloqueado_retorna_erro_explicito_sem_zerar_config(tmp_path, monkeypatch):
+    os.environ["DB_PATH"] = str(tmp_path / "auto_bloqueado.sqlite")
+    monkeypatch.setattr("src.servicos.sessoes.ClienteBinance", _ClienteBinanceFalso)
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/v1/sessao/entrar",
+            json={"api_key": "abcd1234key", "api_secret": "secret9876", "testnet": True},
+        )
+        assert login.status_code == 200
+        asyncio.run(
+            RepositorioConfig.definir(
+                "ajustes_testnet",
+                {"simbolo": "BTCUSDT", "intervalo_segundos": 30, "notional_usdt": 7.0, "lado_inicial": "BUY"},
+            )
+        )
+        asyncio.run(RepositorioConfig.definir("retomada_operacoes_bloqueadas", True))
+        asyncio.run(RepositorioConfig.definir("bloqueio_operacional_motivo", "teste"))
+
+        config = client.put("/v1/auto/config", json={"notional_usdt": 55.0})
+        iniciar = client.post(
+            "/v1/auto/start",
+            json={"simbolo": "BTCUSDT", "intervalo_segundos": 30, "notional_usdt": 55.0, "lado_inicial": "BUY"},
+        )
+        ajustes = asyncio.run(RepositorioConfig.obter("ajustes_testnet"))
+        asyncio.run(RepositorioConfig.definir("retomada_operacoes_bloqueadas", False))
+        asyncio.run(RepositorioConfig.definir("bloqueio_operacional_motivo", ""))
+
+    assert config.status_code == 423
+    assert iniciar.status_code == 423
+    assert config.json()["detail"] == "retomada_operacoes_bloqueadas"
+    assert iniciar.json()["detail"] == "retomada_operacoes_bloqueadas"
+    assert ajustes["notional_usdt"] == 7.0
+
+
 def test_auto_bot_real_usa_mesmo_fluxo_quando_liberado(tmp_path, monkeypatch):
     os.environ["DB_PATH"] = str(tmp_path / "sessao_real_auto.sqlite")
     os.environ["PERMITIR_CONTA_REAL"] = "true"

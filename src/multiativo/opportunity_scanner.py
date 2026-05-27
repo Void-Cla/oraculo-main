@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from .config import ativo_cotacao, metadados_par
 from .profit_guard import avaliar_profit_guard
+
+# Hardcoded — sem os.getenv
+# Estes valores são sobrescritos pelo ControladorAdaptativo em runtime
+_MIN_PROB_PADRAO: float = 0.55
+_MIN_SCORE_PADRAO: float = 0.35
+_MAX_SPREAD_REL: float = 0.003
+_SLIPPAGE_PCT: float = 0.0005   # decimal (0.05%)
 
 
 def _clamp(valor: float, minimo: float, maximo: float) -> float:
@@ -32,20 +38,18 @@ def _score_momentum(features: dict[str, Any]) -> tuple[float, float]:
     return _clamp(abs(bruto) / 0.01, 0.0, 1.0), bruto
 
 
-def _score_spread(features: dict[str, Any]) -> float:
+def _score_spread(features: dict[str, Any], max_spread: float = _MAX_SPREAD_REL) -> float:
     spread = float(features.get("spread_rel", 0.0) or 0.0)
-    max_spread = max(1e-9, float(os.getenv("MAX_SPREAD_REL", "0.003") or 0.003))
-    return _clamp(1.0 - (spread / max_spread), 0.0, 1.0)
+    return _clamp(1.0 - (spread / max(1e-9, max_spread)), 0.0, 1.0)
 
 
-def _score_risco(features: dict[str, Any]) -> float:
+def _score_risco(features: dict[str, Any], max_spread: float = _MAX_SPREAD_REL) -> float:
     spread = float(features.get("spread_rel", 0.0) or 0.0)
     volume_ratio = float(features.get("volume_ratio", 0.0) or 0.0)
     vol = max(float(features.get("vol5", 0.0) or 0.0), float(features.get("vol10", 0.0) or 0.0))
-    max_spread = max(1e-9, float(os.getenv("MAX_SPREAD_REL", "0.003") or 0.003))
-    spread_risk = _clamp(spread / max_spread, 0.0, 2.0) * 0.45
+    spread_risk   = _clamp(spread / max(1e-9, max_spread), 0.0, 2.0) * 0.45
     liquidez_risk = _clamp((1.0 - volume_ratio) / 1.2, 0.0, 1.0) * 0.30
-    vol_risk = _clamp(max(0.0, vol - 0.012) / 0.02, 0.0, 1.0) * 0.25
+    vol_risk      = _clamp(max(0.0, vol - 0.012) / 0.02, 0.0, 1.0) * 0.25
     return _clamp(spread_risk + liquidez_risk + vol_risk, 0.0, 1.0)
 
 
@@ -67,7 +71,8 @@ def _capital_disponivel_par(
     disponivel_usdt = disponivel_quote * preco_quote_usdt if preco_quote_usdt > 0.0 else 0.0
     if quote == "USDT":
         disponivel_usdt = disponivel_quote
-    return min(referencia, disponivel_usdt) if disponivel_usdt > 0.0 else 0.0, disponivel_usdt
+    notional = min(referencia, disponivel_usdt) if disponivel_usdt > 0.0 else 0.0
+    return notional, disponivel_usdt
 
 
 def ranquear_oportunidades(
@@ -78,13 +83,16 @@ def ranquear_oportunidades(
     precos_usdt: dict[str, float],
     capital_info: dict[str, Any],
     perfil_taxas: dict[str, Any],
+    # Parâmetros adaptativos — injetados pelo ControladorAdaptativo
+    min_prob: float = _MIN_PROB_PADRAO,
+    min_score: float = _MIN_SCORE_PADRAO,
+    slippage_pct: float = _SLIPPAGE_PCT,
+    max_spread_rel: float = _MAX_SPREAD_REL,
 ) -> dict[str, Any]:
-    min_prob = max(0.0, float(os.getenv("SIGNAL_MIN_PROB", "0.58") or 0.58))
-    min_score = max(0.0, float(os.getenv("MULTI_MIN_OPPORTUNITY_SCORE", "0.45") or 0.45))
-    slippage_pct = max(0.0, float(os.getenv("SIGNAL_SLIPPAGE_PCT", "0.0005") or 0.0005))
-    taxa_total = float(perfil_taxas.get("taker_decimal_efetiva", 0.0) or 0.0) * 2.0
-    lucro_minimo_pct = float(capital_info.get("lucro_liquido_minimo_pct", 0.0) or 0.0)
-    lucro_minimo_usdt = float(capital_info.get("lucro_liquido_minimo_usdt", 0.0) or 0.0)
+    # taxa_total em decimal (ex: 0.002 = 0.2%), usada como decimal em profit_guard
+    taxa_total = float(perfil_taxas.get("taker_decimal_efetiva", 0.001) or 0.001) * 2.0
+    lucro_minimo_pct  = float(capital_info.get("lucro_liquido_minimo_pct", 0.0) or 0.0)
+    lucro_minimo_usdt = float(capital_info.get("lucro_liquido_minimo_usdt", 0.01) or 0.01)
     resultados: list[dict[str, Any]] = []
 
     for simbolo, snapshot in snapshots.items():
@@ -94,6 +102,7 @@ def ranquear_oportunidades(
         profit_pct = float(sinal.get("lucro_liquido_esperado_pct", 0.0) or 0.0)
         movimento_pct = float(sinal.get("movimento_previsto_pct", 0.0) or 0.0)
         acao = str(sinal.get("acao") or "HOLD").upper()
+
         prob_lado = 0.0
         ev_lado = 0.0
         if acao == "BUY":
@@ -106,8 +115,8 @@ def ranquear_oportunidades(
         score_vol = _score_volatilidade(features)
         score_volume = _score_volume(features)
         score_momentum, momentum_bruto = _score_momentum(features)
-        score_spread = _score_spread(features)
-        score_risco = _score_risco(features)
+        score_spread = _score_spread(features, max_spread_rel)
+        score_risco = _score_risco(features, max_spread_rel)
         score_oportunidade = _clamp(
             (score_vol * 0.23)
             + (score_volume * 0.24)
@@ -128,15 +137,16 @@ def ranquear_oportunidades(
             lucro_liquido_pct=profit_pct,
             notional_usdt=notional_usdt,
             spread_rel=float(features.get("spread_rel", 0.0) or 0.0),
-            taxas_totais_pct=taxa_total,
-            slippage_pct=slippage_pct,
+            taxas_totais_pct=taxa_total,        # decimal — nomeado incorretamente no legado, mantido para compat.
+            slippage_pct=slippage_pct,          # decimal
             minimo_pct=lucro_minimo_pct,
             minimo_usdt=lucro_minimo_usdt,
+            spread_maximo=max_spread_rel,
         )
         motivos = list(guard["motivos"])
         if acao == "HOLD":
             motivos.append("sem_direcao_operavel")
-        if prob_lado < max(min_prob, 0.60):
+        if prob_lado < min_prob:
             motivos.append("probabilidade_abaixo_do_minimo")
         if ev_lado <= 0.0:
             motivos.append("ev_nao_positivo")
@@ -146,37 +156,35 @@ def ranquear_oportunidades(
             motivos.append("capital_indisponivel_para_o_par")
 
         meta = metadados_par(simbolo)
-        resultados.append(
-            {
-                "simbolo": simbolo,
-                "base": meta["base"],
-                "quote": meta["quote"],
-                "acao_sugerida": acao,
-                "score_oportunidade": round(score_oportunidade, 6),
-                "score_componentes": {
-                    "volatilidade": round(score_vol, 6),
-                    "volume": round(score_volume, 6),
-                    "momentum": round(score_momentum, 6),
-                    "spread": round(score_spread, 6),
-                    "risco": round(score_risco, 6),
-                },
-                "momentum_bruto": round(momentum_bruto, 8),
-                "probabilidade_lado": round(prob_lado, 6),
-                "expected_value": round(ev_lado, 8),
-                "movimento_previsto_pct": round(movimento_pct * 100.0, 6),
-                "lucro_liquido_esperado_pct": round(profit_pct * 100.0, 6),
-                "lucro_liquido_esperado_usdt": round(float(guard["lucro_liquido_usdt"]), 8),
-                "capital_disponivel_quote_usdt": round(disponibilidade_usdt, 8),
-                "notional_sugerido_usdt": round(notional_usdt, 8),
-                "spread_rel_pct": round(float(features.get("spread_rel", 0.0) or 0.0) * 100.0, 6),
-                "valida": not motivos,
-                "motivos_bloqueio": sorted(set(motivos)),
-                "regime": sinal.get("regime"),
-                "estrategia": sinal.get("estrategia"),
-                "confirmacao_multi_timeframe": sinal.get("confirmacao_multi_timeframe", {}),
-                "probabilidade_trade": prob,
-            }
-        )
+        resultados.append({
+            "simbolo":                     simbolo,
+            "base":                        meta["base"],
+            "quote":                       meta["quote"],
+            "acao_sugerida":               acao,
+            "score_oportunidade":          round(score_oportunidade, 6),
+            "score_componentes": {
+                "volatilidade": round(score_vol, 6),
+                "volume":       round(score_volume, 6),
+                "momentum":     round(score_momentum, 6),
+                "spread":       round(score_spread, 6),
+                "risco":        round(score_risco, 6),
+            },
+            "momentum_bruto":              round(momentum_bruto, 8),
+            "probabilidade_lado":          round(prob_lado, 6),
+            "expected_value":              round(ev_lado, 8),
+            "movimento_previsto_pct":      round(movimento_pct * 100.0, 6),
+            "lucro_liquido_esperado_pct":  round(profit_pct * 100.0, 6),
+            "lucro_liquido_esperado_usdt": round(float(guard["lucro_liquido_usdt"]), 8),
+            "capital_disponivel_quote_usdt": round(disponibilidade_usdt, 8),
+            "notional_sugerido_usdt":      round(notional_usdt, 8),
+            "spread_rel_pct":              round(float(features.get("spread_rel", 0.0) or 0.0) * 100.0, 6),
+            "valida":                      not motivos,
+            "motivos_bloqueio":            sorted(set(motivos)),
+            "regime":                      sinal.get("regime"),
+            "estrategia":                  sinal.get("estrategia"),
+            "confirmacao_multi_timeframe": sinal.get("confirmacao_multi_timeframe", {}),
+            "probabilidade_trade":         prob,
+        })
 
     ordenadas = sorted(
         resultados,
@@ -189,8 +197,8 @@ def ranquear_oportunidades(
     )
     melhor = ordenadas[0] if ordenadas else None
     return {
-        "pares": ordenadas,
+        "pares":               ordenadas,
         "melhor_oportunidade": melhor,
-        "total_validas": sum(1 for item in ordenadas if item["valida"]),
-        "sem_vantagem_real": not any(item["valida"] for item in ordenadas),
+        "total_validas":       sum(1 for item in ordenadas if item["valida"]),
+        "sem_vantagem_real":   not any(item["valida"] for item in ordenadas),
     }
