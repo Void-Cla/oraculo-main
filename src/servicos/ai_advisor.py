@@ -36,6 +36,14 @@ def _capital_pct_para_confianca(confianca: float) -> int:
     return 10
 
 
+def _remover_cerca_markdown(texto: str) -> str:
+    """Remove a cerca de código markdown (```json ... ```) por SUBSTRING, não por
+    conjunto de caracteres. `lstrip("```json")` apagava qualquer `{`,`j`,`s`,`o`,`n`
+    inicial e podia corromper o JSON; removeprefix tira só o prefixo exato."""
+    texto = (texto or "").strip()
+    return texto.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+
+
 def _heuristica_local(
     regime: str,
     pred_acuracia: float,
@@ -124,8 +132,7 @@ async def _chamar_gpt(prompt: str) -> dict[str, Any] | None:
                     return None
                 data = await resp.json()
         texto = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        texto = texto.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        resultado = json.loads(texto)
+        resultado = json.loads(_remover_cerca_markdown(texto))
         resultado["modelo"] = _MODELO
         return resultado
     except Exception:
@@ -167,6 +174,48 @@ async def obter_insight(
     resultado = _heuristica_local(regime, pred_acuracia, momentum, spread_rel)
     resultado["ts"] = int(time.time() * 1000)
     return resultado
+
+
+async def saude_llm(simbolo: str | None = None) -> dict[str, Any]:
+    """Saúde do conselheiro LLM em runtime: chave presente, modo fallback e último insight.
+
+    `fonte_ultimo_insight`=heuristica_local indica que o GPT não respondeu/não há chave —
+    o sistema segue honesto (não finge ter consultado o LLM). Ver INC-02.
+    """
+    from src.persistencia.conexao import get_conexao  # import tardio: evita acoplar I/O ao módulo
+
+    chave_presente = bool(_GPT_KEY)
+    ultimo: dict[str, Any] | None = None
+    try:
+        async with get_conexao() as con:
+            if simbolo:
+                cur = await con.execute(
+                    "SELECT created_ts, simbolo, modelo, direcao, confianca, reasoning "
+                    "FROM ai_insights WHERE simbolo=? ORDER BY created_ts DESC LIMIT 1",
+                    (str(simbolo).upper(),),
+                )
+            else:
+                cur = await con.execute(
+                    "SELECT created_ts, simbolo, modelo, direcao, confianca, reasoning "
+                    "FROM ai_insights ORDER BY created_ts DESC LIMIT 1"
+                )
+            row = await cur.fetchone()
+        if row:
+            ultimo = {
+                "ts": int(row[0]), "simbolo": row[1], "modelo": row[2],
+                "direcao": row[3], "confianca": row[4], "reasoning": row[5],
+            }
+    except Exception:
+        ultimo = None
+    fonte = (ultimo or {}).get("modelo") or ("gpt" if chave_presente else "heuristica_local")
+    return {
+        "gpt_chave_presente": chave_presente,
+        "modelo_configurado": _MODELO if chave_presente else "heuristica_local",
+        "modo_fallback_ativo": not chave_presente,
+        "ultimo_insight": ultimo,
+        "fonte_ultimo_insight": fonte,
+        "ts": int(time.time() * 1000),
+    }
 
 
 async def persistir_insight(

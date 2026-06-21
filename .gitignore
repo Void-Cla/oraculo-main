@@ -28,3 +28,11 @@ env/
 # Node
 node_modules/
 frontend/node_modules/
+
+# Segredos locais (nunca versionar)
+mec.txt
+
+# Artefatos de build (regenerados por pip install -e)
+*.egg-info/
+build/
+dist/

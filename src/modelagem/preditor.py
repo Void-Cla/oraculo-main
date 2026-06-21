@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.calibracao.bandit import CalibradorBandit
-from src.modelagem.gerenciador_modelo import GerenciadorModelo
+from src.modelagem.gerenciador_modelo import obter_gerenciador_modelo
 from src.servicos.decisor_hibrido import decidir
 
 
@@ -14,7 +14,8 @@ def preditor_end_to_end(
     saldo: dict[str, Any] | None = None,
     ajustes_sinal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    gerenciador = GerenciadorModelo(simbolo=simbolo)
+    # Instância cacheada por símbolo — sem joblib.load a cada ciclo (PERF-01).
+    gerenciador = obter_gerenciador_modelo(simbolo)
     y_hat = gerenciador.predict(features)
 
     calibrador = CalibradorBandit()

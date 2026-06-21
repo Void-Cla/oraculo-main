@@ -10,7 +10,7 @@ import numpy as np
 from sklearn.linear_model import SGDRegressor
 from sklearn.preprocessing import StandardScaler
 
-from src.core.settings import env_float, model_dir
+from src.core.settings import env_float, env_int, model_dir
 
 FEATURE_ORDER = [
     "r_1m",
@@ -134,14 +134,25 @@ class GerenciadorModelo:
         return close * (1.0 + variacao)
 
     def _predicao_online(self, features: dict[str, Any]) -> float | None:
-        if not self._esta_ajustado():
+        # Gate de confiabilidade: um modelo sub-treinado (poucas amostras) com SGD pode
+        # divergir e cravar predições extremas, dominando o sinal. Só usa o online após
+        # um aquecimento mínimo (MIN_AMOSTRAS_ONLINE). Abaixo disso, vale o fallback são.
+        min_amostras = env_int("MIN_AMOSTRAS_ONLINE", 200, minimo=1)
+        if not self._esta_ajustado() or self._amostras_ajustadas < min_amostras:
             return None
         try:
             x = self._features_para_array(features)
             x_norm = self._scaler.transform(x)
-            return self._normalizar_predicao_preco(features, float(self._modelo.predict(x_norm)[0]))
+            norm = self._normalizar_predicao_preco(features, float(self._modelo.predict(x_norm)[0]))
         except Exception:
             return None
+        # Guarda de divergência: se a predição satura o clamp de variação, o modelo
+        # provavelmente explodiu os coeficientes → descartar (não poluir o consenso com ±máximo).
+        close = float(features.get("close", 0.0) or 0.0)
+        limite = env_float("MAX_VARIACAO_PREVISTA", 0.02, minimo=0.001)
+        if close > 0.0 and abs((norm - close) / close) >= (limite - 1e-9):
+            return None
+        return norm
 
     def _predicao_batch(self, features: dict[str, Any]) -> float | None:
         if self._modelo_batch is None:
@@ -192,7 +203,19 @@ class GerenciadorModelo:
         with self._meta_path.open("w", encoding="utf-8") as arquivo:
             json.dump(self.status(), arquivo, ensure_ascii=False, indent=2)
 
+    def _coef_norm(self) -> float | None:
+        """Norma L2 dos coeficientes do modelo online — indicador de divergência.
+        Saudável: pequeno. O modelo saturado do run 13-18h tinha norma ~71."""
+        coef = getattr(self._modelo, "coef_", None)
+        if coef is None:
+            return None
+        try:
+            return float(np.linalg.norm(np.asarray(coef, dtype=float)))
+        except Exception:
+            return None
+
     def status(self) -> dict[str, Any]:
+        min_amostras = env_int("MIN_AMOSTRAS_ONLINE", 200, minimo=1)
         return {
             "simbolo": self.simbolo,
             "versao": self._versao,
@@ -206,4 +229,48 @@ class GerenciadorModelo:
             "meta_batch_path": str(self._meta_batch_path),
             "esta_ajustado": self._esta_ajustado(),
             "batch_carregado": self._modelo_batch is not None,
+            # Saúde do treino online em runtime (observabilidade):
+            "min_amostras_online": min_amostras,
+            "gate_amostras_ok": self._amostras_ajustadas >= min_amostras,
+            "online_em_uso": self._esta_ajustado() and self._amostras_ajustadas >= min_amostras,
+            "coef_norm": self._coef_norm(),
+            "max_variacao_prevista": env_float("MAX_VARIACAO_PREVISTA", 0.02, minimo=0.001),
         }
+
+
+# ── Cache de instâncias por símbolo (PERF-01) ───────────────────────────────
+# Evita o joblib.load() a cada ciclo de predição. A invalidação é por assinatura de
+# disco (mtime do modelo online + mtime do diretório): quando o treinador salva um novo
+# modelo, a assinatura muda e o preditor recarrega — o aprendizado online não é perdido.
+_CACHE_GERENCIADORES: dict[str, tuple[tuple[float, float], "GerenciadorModelo"]] = {}
+
+
+def _assinatura_disco(simbolo: str) -> tuple[float, float]:
+    diretorio = MODEL_DIR / simbolo.upper()
+
+    def _mtime(caminho: Path) -> float:
+        try:
+            return caminho.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    # Assinatura por mtime dos ARQUIVOS de modelo (não do diretório, cujo mtime muda ao criá-lo):
+    # online cobre o aprendizado online; batch resolvido cobre re-treinos batch.
+    online = _mtime(diretorio / "modelo_online.joblib")
+    batch_path = diretorio / "modelo_batch.joblib"
+    if not batch_path.exists():
+        candidatos = sorted(diretorio.glob("batch-*.joblib"))
+        batch_path = candidatos[-1] if candidatos else batch_path
+    return (online, _mtime(batch_path))
+
+
+def obter_gerenciador_modelo(simbolo: str) -> "GerenciadorModelo":
+    """Retorna um GerenciadorModelo cacheado por símbolo, recarregando só se o disco mudou."""
+    chave = simbolo.upper()
+    assinatura = _assinatura_disco(chave)
+    cacheado = _CACHE_GERENCIADORES.get(chave)
+    if cacheado is not None and cacheado[0] == assinatura:
+        return cacheado[1]
+    gerenciador = GerenciadorModelo(simbolo=chave)
+    _CACHE_GERENCIADORES[chave] = (assinatura, gerenciador)
+    return gerenciador

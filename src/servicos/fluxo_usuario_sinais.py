@@ -5,12 +5,14 @@ from typing import Any
 from fastapi import HTTPException
 
 from src.executor.executor_usuario import ExecutorIsoladoUsuario
+from src.multiativo.fee_optimizer import aplicar_taxa_efetiva
 from src.observabilidade.audit import registrar_audit
+from src.observabilidade.logger import get_logger
 from src.persistencia.repositorio_auditoria import RepositorioAuditoria
 from src.persistencia.repositorio_livro_topo import RepositorioLivroTopo
 from src.persistencia.repositorio_ohlcv import RepositorioOhlcv
 from src.persistencia.repositorio_ordens import RepositorioOrdens
-from src.persistencia.repositorio_snapshot import obter_snapshot, salvar_snapshot
+from src.persistencia.repositorio_snapshot import atualizar_snapshot
 from src.persistencia.repositorio_usuarios import RepositorioUsuarios
 from src.risco.risk_engine import avaliar_sinal_para_usuario
 from src.servicos.ajustes import obter_ajustes_risco, obter_ajustes_sinal
@@ -18,6 +20,10 @@ from src.servicos.noticias import obter_noticias_para_peso
 from src.sinais.fila_sinais import fila_sinais_global
 from src.sinais.signal_engine import gerar_sinal_orquestrado
 from src.tarefas.retomada import operacoes_bloqueadas_por_retomada
+
+# Logger do módulo — sua ausência causava NameError no fluxo default (publicar_fila=True),
+# mascarado por um segundo NameError no próprio except (BUG-01).
+logger = get_logger(__name__)
 
 
 def _item_para_dict(item: Any) -> dict[str, Any]:
@@ -57,6 +63,11 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
 
     simbolo = str(payload.get("simbolo", "BTCUSDT") or "BTCUSDT").upper()
     ajustes_sinal = (await obter_ajustes_sinal())["aplicado"]
+    # INC-03: se o chamador fornece o perfil de taxas, usa a taxa efetiva (com desconto BNB),
+    # garantindo o MESMO EV do autotrader para o mesmo trade (fonte única em fee_optimizer).
+    perfil_taxas = _item_para_dict(payload.get("perfil_taxas")) if payload.get("perfil_taxas") else None
+    if perfil_taxas:
+        ajustes_sinal = aplicar_taxa_efetiva(ajustes_sinal, perfil_taxas)
     ajustes_risco = (await obter_ajustes_risco())["aplicado"]
     klines, livro_topo = await _carregar_mercado_para_sinal(simbolo, payload)
     saldo = _item_para_dict(payload.get("saldo")) if payload.get("saldo") else None
@@ -143,10 +154,10 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
                 "janela_decisao": aprovacao.get("janela_decisao", {}),
             },
         )
-        snapshot = dict(await obter_snapshot(simbolo) or {})
-        await salvar_snapshot(
+        # Read-modify-write atômico do snapshot (INC-05) — sem lost update.
+        await atualizar_snapshot(
             simbolo,
-            {
+            lambda snapshot: {
                 **snapshot,
                 "modo_operacao": snapshot.get("modo_operacao", "normal"),
                 "ultima_ordem": {
@@ -217,10 +228,10 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
                 "motivo_sinal": sinal.get("motivo"),
             },
         )
-        snapshot = dict(await obter_snapshot(simbolo) or {})
-        await salvar_snapshot(
+        # Read-modify-write atômico do snapshot (INC-05) — sem lost update.
+        await atualizar_snapshot(
             simbolo,
-            {
+            lambda snapshot: {
                 **snapshot,
                 "ultima_rejeicao": {
                     "ordem_id": ordem_id,

@@ -3,6 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+# --- Limiares de consenso entre fontes (estratégia, modelo, LLM, confirmação, probabilidade) ---
+# ⚠️ ASSIMETRIA CONHECIDA E INTENCIONALMENTE EXPLÍCITA (INC-01):
+# A configuração atual é enviesada a ABRIR trade — basta 1 fonte fracamente alinhada
+# (score >= 0.10) para confirmar, mas exige 2 fontes FORTEMENTE contrárias (score >= 0.35)
+# para vetar. Isso gera mais trades do que bloqueia.
+# NÃO simetrizar sem dados: alterar limiares de risco sem backtest é, por si só, um risco.
+# CALIBRAR com o backtester (Fase 8). Para remover o viés: igualar ALINHAMENTO == VETO
+# e MIN_FONTES_ALINHADAS == MIN_FONTES_CONTRARIAS.
+LIMIAR_ALINHAMENTO_FONTE: float = 0.10    # score mínimo p/ uma fonte CONFIRMAR a estratégia
+LIMIAR_VETO_FONTE: float = 0.35           # score mínimo p/ uma fonte CONTRÁRIA contar como veto
+MIN_FONTES_ALINHADAS_CONFIRMA: int = 1    # nº de fontes alinhadas p/ liberar o trade
+MIN_FONTES_CONTRARIAS_VETA: int = 2       # nº de fontes contrárias p/ vetar o trade
+
 
 def _clamp(valor: float, minimo: float, maximo: float) -> float:
     return max(minimo, min(maximo, valor))
@@ -118,12 +131,12 @@ def consolidar_decisao(
     alinhados = [
         item.nome
         for item in fontes
-        if item.nome != "estrategia" and acao_estrategia != "HOLD" and item.acao == acao_estrategia and abs(item.score) >= 0.10
+        if item.nome != "estrategia" and acao_estrategia != "HOLD" and item.acao == acao_estrategia and abs(item.score) >= LIMIAR_ALINHAMENTO_FONTE
     ]
     contrarios = [
         item.nome
         for item in fontes
-        if item.nome != "estrategia" and acao_estrategia != "HOLD" and item.acao not in {"HOLD", acao_estrategia} and abs(item.score) >= 0.35
+        if item.nome != "estrategia" and acao_estrategia != "HOLD" and item.acao not in {"HOLD", acao_estrategia} and abs(item.score) >= LIMIAR_VETO_FONTE
     ]
 
     motivo_extra = "consenso_neutro"
@@ -152,13 +165,13 @@ def consolidar_decisao(
     elif acao_estrategia == "HOLD":
         acao_final = "HOLD"
         motivo_extra = "estrategia_em_hold"
-    elif len(alinhados) >= 1:
+    elif len(alinhados) >= MIN_FONTES_ALINHADAS_CONFIRMA:
         acao_final = acao_estrategia
         motivo_extra = "consenso_favoravel"
     elif acao_consenso == acao_estrategia:
         acao_final = acao_estrategia
         motivo_extra = "consenso_ponderado_favoravel"
-    elif len(contrarios) >= 2 and not force_allow:
+    elif len(contrarios) >= MIN_FONTES_CONTRARIAS_VETA and not force_allow:
         acao_final = "HOLD"
         motivo_extra = "bloqueado_por_consenso_contrario"
 

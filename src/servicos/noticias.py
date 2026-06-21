@@ -647,7 +647,8 @@ def _merge_classificacao(
                 "tags": tags,
                 "resumo_analise": gpt_item.get("resumo"),
                 "fonte_analise": "openai_responses_api" if gpt_item else "heuristica_local",
-                "modelo_llm": _modelo_llm(),
+                # INC-02: o modelo reportado reflete a ORIGEM real deste item (não mente na auditoria).
+                "modelo_llm": _modelo_llm() if gpt_item else "heuristica_local",
             }
         )
 
@@ -659,7 +660,8 @@ def _merge_classificacao(
         "sentimento_geral": _clamp(float(classificacao_openai.get("sentimento_geral", sentimento_geral) or sentimento_geral), -1.0, 1.0),
         "confianca": _clamp(float(classificacao_openai.get("confianca", 0.0) or 0.0), 0.0, 1.0),
         "resumo": classificacao_openai.get("resumo") or None,
-        "modelo_llm": _modelo_llm(),
+        # INC-02: coerente com status_classificacao — só reporta GPT quando veio do GPT.
+        "modelo_llm": _modelo_llm() if classificacao_openai else "heuristica_local",
         "status_classificacao": "openai_responses_api" if classificacao_openai else "heuristica_local",
     }
     return itens_saida, meta

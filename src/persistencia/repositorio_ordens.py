@@ -85,7 +85,8 @@ class RepositorioOrdens:
             cursor = await conn.execute(
                 """
                 SELECT id, created_ts, updated_ts, usuario_id, simbolo, lado, status, modo,
-                       preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct, detalhe_json
+                       preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct,
+                       lucro_usdt, lucro_pct, duracao_ms, capital_pct_usado, regime, estrategia, detalhe_json
                 FROM ordens
                 WHERE id = ?
                 """,
@@ -151,7 +152,8 @@ class RepositorioOrdens:
             cursor = await conn.execute(
                 f"""
                 SELECT id, created_ts, updated_ts, usuario_id, simbolo, lado, status, modo,
-                       preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct, detalhe_json
+                       preco_referencia, quantidade, notional, stop_loss_pct, take_profit_pct,
+                       lucro_usdt, lucro_pct, duracao_ms, capital_pct_usado, regime, estrategia, detalhe_json
                 FROM ordens
                 {where}
                 ORDER BY created_ts DESC, id DESC

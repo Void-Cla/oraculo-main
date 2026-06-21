@@ -9,9 +9,14 @@ from typing import Any
 from binance import AsyncClient
 
 from src.core.settings import env_bool, env_int, env_str, env_float
+from src.executor.idempotencia import gerar_client_order_id
 from src.observabilidade.logger import get_logger
 
 LOG = get_logger("gerenciador_ordens")
+
+# Toda posição aberta será fechada: a taxa incide na entrada E na saída (round-trip).
+# Contar uma única perna subestima o custo real e infla a lucratividade. (BUG-03, DA-02)
+NUMERO_DE_PERNAS = 2
 
 
 class NotionalTooSmall(Exception):
@@ -104,7 +109,8 @@ class GerenciadorOrdens:
         fator_slippage = 1.0 + slippage if lado == "BUY" else 1.0 - slippage
         preco_exec = preco_base * fator_slippage
         notional = quantidade * preco_exec
-        custo_total = notional * taxa
+        # Custo round-trip (entrada + saída) — ver NUMERO_DE_PERNAS. (BUG-03)
+        custo_total = notional * taxa * NUMERO_DE_PERNAS
         return {
             "lado": lado,
             "quantidade": quantidade,
@@ -119,7 +125,9 @@ class GerenciadorOrdens:
             "tipo_ordem_planejada": "LIMIT_AGENDADA",
         }
 
-    async def criar_ordem_limit(self, simbolo: str, lado: str, quantidade: float, preco: float) -> dict[str, Any]:
+    async def criar_ordem_limit(
+        self, simbolo: str, lado: str, quantidade: float, preco: float, client_order_id: str | None = None
+    ) -> dict[str, Any]:
         lado = lado.upper()
         if lado not in {"BUY", "SELL"}:
             raise ValueError("lado invalido")
@@ -139,6 +147,10 @@ class GerenciadorOrdens:
         decimals = max(0, -Decimal(str(step_size)).as_tuple().exponent) if step_size > 0 else 8
         q_dec = Decimal(str(quantidade_ajustada)).quantize(Decimal((0, (1,), -decimals)) if decimals > 0 else Decimal(1), rounding=ROUND_DOWN)
         quantidade_str = format(q_dec.normalize(), 'f')
+        # Idempotência (PSF-03): toda ordem leva um clientOrderId determinístico da intenção.
+        coid = client_order_id or gerar_client_order_id(
+            simbolo=simbolo, lado=lado, notional=quantidade_ajustada * preco
+        )
         cliente = await self._obter_cliente()
         # Try creating order; if Binance complains about precision, retry
         # with fewer decimals progressively.
@@ -156,6 +168,7 @@ class GerenciadorOrdens:
                         timeInForce="GTC",
                         quantity=q_str_try,
                         price=str(preco),
+                        newClientOrderId=coid,
                     ),
                     timeout=self._timeout,
                 )
@@ -176,6 +189,7 @@ class GerenciadorOrdens:
         lado: str,
         quantidade: float | None = None,
         quote_order_qty: float | None = None,
+        client_order_id: str | None = None,
     ) -> dict[str, Any]:
         lado = lado.upper()
         if lado not in {"BUY", "SELL"}:
@@ -187,6 +201,10 @@ class GerenciadorOrdens:
             "symbol": simbolo.upper(),
             "side": lado,
             "type": "MARKET",
+            # Idempotência (PSF-03): clientOrderId determinístico — propaga a payload_try (dict(payload)).
+            "newClientOrderId": client_order_id or gerar_client_order_id(
+                simbolo=simbolo, lado=lado, notional=float(quote_order_qty or quantidade or 0.0)
+            ),
         }
         # configurable cap: max factor by which we may increase user-requested
         # amount to meet MIN_NOTIONAL. Default 1.2 (20% increase max).

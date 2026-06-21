@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.core.constantes_mercado import VOLATILIDADE_ALTA, VOLATILIDADE_BAIXA
+
 from .conexao import get_conexao, inicializar_db
 
 
@@ -17,7 +19,8 @@ class RepositorioFeatures:
         # Extrair regime e vol_regime para colunas indexadas (facilita queries ML)
         regime = str(features.get("regime") or "")
         vol_ref = max(float(features.get("vol5") or 0.0), float(features.get("vol10") or 0.0))
-        vol_regime = "HIGH" if vol_ref >= 0.012 else ("LOW" if vol_ref <= 0.003 else "MED")
+        # Mesmos limiares do regime_detector (fonte única — INC-06 resolvido).
+        vol_regime = "HIGH" if vol_ref >= VOLATILIDADE_ALTA else ("LOW" if vol_ref <= VOLATILIDADE_BAIXA else "MED")
         async with get_conexao() as conn:
             await conn.execute(
                 """

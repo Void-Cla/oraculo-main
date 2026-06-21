@@ -8,8 +8,6 @@ Converter previsao bruta em saida mais confiavel para tomada de decisao.
 
 - `bandit.py`
   - `CalibradorBandit`: calibra previsao e confianca com ajuste adaptativo leve.
-- `ewls.py`
-  - `CalibradorEWLS`: alternativa de calibracao com suavizacao ponderada no tempo.
 
 ## Razao logica
 

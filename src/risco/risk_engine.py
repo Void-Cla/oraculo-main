@@ -37,6 +37,12 @@ def _clamp(valor: float, minimo: float, maximo: float) -> float:
 
 
 def ev_minimo_liquido_usdt(risk_cfg: dict[str, Any]) -> float:
+    # Piso de EV mínimo exigido. Por padrão é rígido em $0.01 (não opera EV abaixo disso).
+    # `permitir_ev_negativo` (modo exploração, testnet-only — ver _aplicar_modo_exploracao)
+    # libera operar abaixo do piso, aceitando EV negativo. A POLÍTICA (só testnet) é imposta
+    # pelo chamador; aqui só respeitamos o flag — mecanismo separado da política.
+    if bool(risk_cfg.get("permitir_ev_negativo", False)):
+        return float(risk_cfg.get("filtro_ev_minimo_usdt", 0.0) or 0.0)
     configurado = max(0.0, float(risk_cfg.get("filtro_ev_minimo_usdt", 0.01) or 0.0))
     return max(0.01, configurado)
 

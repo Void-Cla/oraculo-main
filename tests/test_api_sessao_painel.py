@@ -500,6 +500,10 @@ def test_auto_bot_real_usa_mesmo_fluxo_quando_liberado(tmp_path, monkeypatch):
     monkeypatch.setattr("src.main.obter_ajustes_testnet", _obter_ajustes_testnet)
     monkeypatch.setattr("src.main.AUTO_TRADER.status", _status_auto_trade)
     monkeypatch.setattr("src.main.AUTO_TRADER.iniciar", _iniciar_auto_trade)
+    # Este teste exercita o ROTEAMENTO de conta real (com ClienteBinance falso), não a
+    # validação de startup. O fail-fast (PSF-01) recusaria DB de teste + sem chaves em modo
+    # real — comportamento correto em produção; aqui o neutralizamos para testar o fluxo.
+    monkeypatch.setattr("src.main.exigir_config_valida", lambda: None)
 
     try:
         with TestClient(app) as client:

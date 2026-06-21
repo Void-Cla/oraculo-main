@@ -55,3 +55,16 @@ def montar_perfil_taxas(
         "saldo_bnb_minimo":        _BNB_SALDO_MINIMO,
         "inferencia_por_saldo_bnb": desconto_ativo,
     }
+
+
+def aplicar_taxa_efetiva(ajustes_sinal: dict[str, Any], perfil_taxas: dict[str, Any]) -> dict[str, Any]:
+    """FONTE ÚNICA (INC-03): injeta a taxa taker efetiva (com desconto BNB) em `ajustes_sinal`.
+
+    Usada tanto pelo autotrader quanto pelo fluxo manual, para que o MESMO trade receba a
+    MESMA avaliação de EV independentemente do caminho que o acionou.
+    """
+    ajustes_exec = dict(ajustes_sinal)
+    taxa_taker_efetiva = float((perfil_taxas or {}).get("taker_decimal_efetiva", 0.0) or 0.0)
+    if taxa_taker_efetiva > 0.0:
+        ajustes_exec["signal_trade_fee_pct"] = taxa_taker_efetiva
+    return ajustes_exec

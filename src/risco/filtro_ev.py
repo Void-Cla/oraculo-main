@@ -40,6 +40,10 @@ def calcular_ev_liquido(
 
     A divisão por 100 é aplicada apenas às taxas (que chegam em %).
     O slippage já chega em decimal e é usado diretamente.
+
+    CUSTO ROUND-TRIP (DA-02): taxa E slippage incidem na entrada E na saída.
+    Contar slippage uma única perna subestima o custo e infla o EV — divergindo de
+    EVCalculator e profit_guard, que já usam round-trip. Por isso ambos são × 2 aqui.
     """
     prob_up = _validar_probabilidade(prob_up, "prob_up")
     prob_down = _validar_probabilidade(prob_down, "prob_down")
@@ -53,8 +57,8 @@ def calcular_ev_liquido(
     # slippage já em decimal — usar diretamente
     slippage = _validar_valor_nao_negativo(slippage_pct, "slippage_pct")
 
-    custo_taxa = valor_ordem * taxa_pct * 2.0      # entrada + saída
-    custo_slippage = valor_ordem * slippage
+    custo_taxa = valor_ordem * taxa_pct * 2.0       # taxa round-trip (entrada + saída)
+    custo_slippage = valor_ordem * slippage * 2.0   # slippage round-trip (entrada + saída) — DA-02
     ev_bruto = (prob_up * ganho) - (prob_down * perda)
     return ev_bruto - custo_taxa - custo_slippage
 

@@ -115,5 +115,6 @@ def analisar_contexto(
         "sentimento_noticias": sentimento_noticias,
         "tags": sorted(set(tags)),
         "fonte": fonte_analise,
-        "modelo_llm": "gpt-4o-mini",
+        # INC-02: coerente com `fonte` — só identifica o GPT quando a análise veio dele.
+        "modelo_llm": "gpt-4o-mini" if fonte_analise == "openai_responses_api" else "heuristica_local",
     }

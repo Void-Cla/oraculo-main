@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.core.constantes_mercado import (
+    AMPLITUDE_ALTA,
+    RETORNO_LATERAL_MAX,
+    VOLATILIDADE_ALTA,
+    VOLATILIDADE_BAIXA,
+)
+
 
 def detectar_regime(features: dict[str, Any]) -> dict[str, Any]:
     vol5 = float(features.get("vol5", 0.0) or 0.0)
@@ -16,10 +23,10 @@ def detectar_regime(features: dict[str, Any]) -> dict[str, Any]:
     regime = "RANGE"
     score = 0.45
 
-    if vol_ref >= 0.012 or amplitude_rel >= 0.018:
+    if vol_ref >= VOLATILIDADE_ALTA or amplitude_rel >= AMPLITUDE_ALTA:
         regime = "HIGH_VOL"
         score = 0.8
-    elif abs(r_5m) <= 0.0015 and vol_ref <= 0.0035:
+    elif abs(r_5m) <= RETORNO_LATERAL_MAX and vol_ref <= VOLATILIDADE_BAIXA:
         regime = "LOW_VOL"
         score = 0.7
     elif ema5 > ema10 and r_15m >= 0:

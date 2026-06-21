@@ -1,0 +1,24 @@
+{
+  "$comment": "Allowlist de comandos seguros (somente leitura / testes) para reduzir prompts. Nada destrutivo. Veja skill.md secao 2.",
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(pytest:*)",
+      "Bash(find:*)",
+      "Bash(wc:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(ruff check:*)",
+      "Bash(mypy:*)",
+      "Read(//c/Users/fox/OneDrive/**)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)"
+    ]
+  }
+}

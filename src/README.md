@@ -56,7 +56,7 @@ Sumário
 - `api/` — adaptação/expôr `app` (FastAPI).
 - `binance_api/` — cliente Binance (`ClienteBinance`) e coletores (REST/WS).
 - `calculos/` — gerador de features (`gerador_features.py`).
-- `calibracao/` — código de calibração (bandit, ewls).
+- `calibracao/` — código de calibração (`bandit.py`).
 - `contratos/` — contratos de domínio e helpers de trading.
 - `core/` — configurações e gerenciamento de secrets (`settings.py`, `segredos.py`).
 - `persistencia/` — camada de acesso a dados (repositórios e conexões).
@@ -66,8 +66,12 @@ Sumário
 - `risco/` — engine de risco e sizing (validação de sinal por usuário).
 - `executor/` — lógica para preparar e enviar ordens (paper/real).
 - `servicos/` — orquestração de fluxos (painel, notícias, sessões, ajustes).
-- `tarefas/` — background tasks e loops (previsão, consumidor de fila).
-- `observabilidade/` — logger e métricas (Prometheus).
+- `tarefas/` — background tasks e loops (previsão, consumidor de fila, coletor contínuo).
+- `observabilidade/` — logger, métricas (Prometheus), qualidade de sinal (IC/Brier/drawdown),
+	correlation_id e saúde de modelo/treino (`saude_modelo.py`).
+- `multiativo/` — scanner, capital, arbitragem triangular, profit-guard e orquestrador.
+- `backtester/` — backtester WALK-FORWARD com lucro líquido (`walk_forward.py`).
+- `core/` — settings (`load_dotenv`), segredos e validação fail-fast de config.
 
 ### Estrutura de pastas (visão rápida)
 
@@ -141,9 +145,11 @@ As DDL e pragmas estão em `src/persistencia/conexao.py` e a inicialização
 	- Retry, sincronização de timestamp, rotação de chaves (opcional).
 	- Métodos: `obter_klines`, `obter_order_book_top`, `obter_preco_atual`, `obter_conta_raw`, etc.
 - Coletores:
-	- `coletor_velas_rest.coletar_e_persistir` baixa klines, salva OHLCV,
-		salva livro topo e features.
-	- Há também implementações para WS e 15s (`coletor_velas_ws.py`, `coletor_velas_15s.py`).
+	- `coletor_velas_rest.coletar_e_persistir` baixa klines (1m), salva OHLCV,
+		livro topo e features (upsert idempotente).
+	- `tarefas/coletor_continuo.loop_coleta_continua` — coleta CONTÍNUA (REST público,
+		sem credenciais) em loop, ligada por `ATIVAR_COLETA_CONTINUA`. Acumula dado real
+		para pesquisa de edge independente do trading.
 
 ## API pública (endpoints principais)
 
@@ -156,6 +162,10 @@ As rotas estão em `main.py` (FastAPI). Principais endpoints:
 - `/v1/previsao/manual` — enviar payload manual com klines/livro/notícias.
 - `/v1/sessao/entrar` `/v1/sessao/status` `/v1/sessao/sair` — sessão Binance (cookies).
 - `/v1/auto/*` — iniciar/parar auto-trader (testnet/real) e status.
+- `/v1/diagnostico` — visão consolidada (health + treino online + LLM).
+- `/v1/modelos/treino` — saúde do treino online: gate de amostras, divergência (`coef_norm`),
+	`online_em_uso` e IC de **retorno** recente (métrica de edge — não preço).
+- `/v1/ai/saude` — vida do LLM (chave presente, modo fallback, último insight).
 - `/v1/export/*` — exportar OHLCV, features, predicoes, outcomes, auditoria.
 - `/v1/dashboard/resumo` — montar dashboard combinado via `servicos.dashboard`.
 
@@ -196,8 +206,8 @@ Para uma lista completa, grep por `os.getenv(` e `env_*` nas fontes.
 ```powershell
 # ativar venv
 & .\\.venv\\Scripts\\Activate.ps1
-# rodar uvicorn apontando para src.api.app:app
-uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
+# entry point canônico: src.main:app (mesmo de start.sh/start.bat)
+uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 4. Para iniciar loops/background workers, setar `ATIVAR_LOOP_PREVISAO=true` antes de iniciar.
@@ -230,12 +240,17 @@ Scripts utilitários estão em `scripts/` (migrar DB, criar usuários de teste, 
 6. `src/risco/risk_engine.py` — regras por usuário e sizing.
 7. `src/executor/` — concretização do envio de ordens.
 
----
+## Segurança e estado de edge (fiel, 2026-06)
 
-Se quiser, eu posso:
-- gerar um diagrama de fluxo (Mermaid) do pipeline;
-- extrair automaticamente todas as variáveis de ambiente usadas;
-- ou criar documentação adicional por módulo (um README por subpasta).
+- **Segurança:** fail-fast de config no startup; conta real bloqueada por padrão; breaker de perda
+	diária persistido (sobrevive a restart, reset humano); custo round-trip coeso em todas as camadas;
+	só abre/encerra ciclo após confirmar o fill (anti-posição-fantasma); EV negativo proibido em conta real.
+- **Modelo:** gate anti-divergência descarta modelo online sub-treinado/saturado (`coef_norm` alto) —
+	visível em `/v1/modelos/treino`. Hoje o modelo está frio (poucas amostras, batch ausente) → o bot
+	roda no fallback heurístico até acumular dado.
+- **Edge:** pesquisa walk-forward com lucro LÍQUIDO mostra que **não há edge tradeável nos dados atuais**
+	(retorno bruto < custo). Pré-requisito para operar com lucro: ligar `ATIVAR_COLETA_CONTINUA`, acumular
+	dado por dias, re-rodar `scripts/backtest_walkforward.py` e só operar se `net/trade > 0` estável.
 
-Arquivo gerado automaticamente pelo assistente — atualizar conforme mudanças no código.
+> Estado vivo do projeto: `.claude/contexto.md`. Lições/armadilhas: `.claude/skill.md`.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 import time
 from typing import Any
 
@@ -12,7 +13,7 @@ from src.executor.executor_usuario import ExecutorIsoladoUsuario
 from src.executor.gerenciador_ordens import GerenciadorOrdens, NotionalTooSmall
 from src.modelagem.treinador_online import ajustar_online
 from src.multiativo.config import ativo_cotacao, pares_monitorados, par_usdt_do_ativo, validar_par_monitorado
-from src.multiativo.fee_optimizer import montar_perfil_taxas
+from src.multiativo.fee_optimizer import aplicar_taxa_efetiva, montar_perfil_taxas
 from src.multiativo.orquestrador import montar_monitoramento_multiativo
 from src.observabilidade.logger import get_logger
 from src.persistencia.repositorio_auditoria import RepositorioAuditoria
@@ -24,6 +25,15 @@ from src.persistencia.repositorio_outcomes import RepositorioOutcomes
 from src.risco.risk_engine import avaliar_sinal_para_usuario, ev_minimo_liquido_usdt
 from src.servicos.ajustes import obter_ajustes_risco, obter_ajustes_sinal
 from src.adaptacao.controlador_adaptativo import ControladorAdaptativo
+from src.autotrader.calculos import (
+    _custos_ciclo_pct,
+    _data_operacional,
+    _normalizar_notional_operacional,
+    _piso_lucro_percentual,
+    _teto_notional_operacional_usdt,
+    _valor_posicao_usdt,
+)
+from src.autotrader.configurador import _ajustes_microtrading_auto, _usuario_virtual
 from src.servicos.noticias import obter_noticias_para_peso
 from src.servicos.painel_conta import calcular_pnl_negociacoes
 from src.sinais.signal_engine import gerar_sinal_orquestrado
@@ -85,50 +95,8 @@ def _limiar_residuo_ignorado_usdt() -> float:
     return 5.0
 
 
-def _teto_notional_operacional_usdt() -> float:
-    return 100.0
-
-
-def _normalizar_notional_operacional(valor: Any) -> float:
-    # Accept any non-negative notional provided by the client (no hard ceiling).
-    # Keep a lower bound of 0.0 to avoid negative values.
-    return max(0.0, float(valor or 0.0))
-
-
-def _valor_posicao_usdt(saldo_base: float, preco_atual_usdt: float) -> float:
-    return max(0.0, saldo_base) * max(0.0, preco_atual_usdt)
-
-
-def _custos_ciclo_pct(ajustes_sinal: dict[str, Any], spread_rel: float) -> float:
-    taxa_trade = max(0.0, float(ajustes_sinal.get("signal_trade_fee_pct", 0.0012) or 0.0))
-    slippage = max(0.0, float(ajustes_sinal.get("signal_slippage_pct", 0.0005) or 0.0))
-    return (taxa_trade * 2.0) + (slippage * 2.0) + max(0.0, spread_rel)
-
-
-def _piso_lucro_percentual(
-    ajustes_sinal: dict[str, Any],
-    *,
-    notional_usdt: float,
-    lucro_liquido_minimo_usdt: float,
-) -> float:
-    notional_base = max(0.0, float(notional_usdt or 0.0))
-    spread_piso = 0.0002
-    multiplicador_seguranca = 1.05
-    piso_pct_env = 0.0004
-    custos_pct = _custos_ciclo_pct(ajustes_sinal, spread_piso)
-    # `lucro_liquido_esperado_pct` ja vem liquido de custos do signal engine.
-    # Aqui entra apenas uma margem operacional extra, nao o custo inteiro novamente.
-    piso_por_buffer = custos_pct * max(0.0, multiplicador_seguranca - 1.0)
-    piso_por_usdt = (float(lucro_liquido_minimo_usdt or 0.0) / notional_base) if notional_base > 0.0 else 0.0
-    # No modo auto, o piso de lucro precisa responder ao capital e ao alvo
-    # liquido real do perfil. Nao reutilizamos cegamente o override manual
-    # salvo em `ajustes_sinal`, porque ele pode ficar muito alto para
-    # micro-oportunidades e travar o bot inteiro.
-    return max(piso_por_buffer, piso_por_usdt, piso_pct_env)
-
-
-def _data_operacional() -> str:
-    return time.strftime("%Y-%m-%d")
+# Funções puras de cálculo do ciclo foram extraídas para src/autotrader/calculos.py (FASE 6).
+# Importadas no topo do módulo e re-exportadas para manter compatibilidade.
 
 
 def _meta_lucro_segura_do_dia(state: dict[str, Any], capital_diario_usdt: float) -> float:
@@ -636,65 +604,20 @@ def _selecionar_simbolo_foco(
 
 
 def _ajustes_sinal_com_taxa_efetiva(ajustes_sinal: dict[str, Any], perfil_taxas: dict[str, Any]) -> dict[str, Any]:
-    ajustes_exec = dict(ajustes_sinal)
-    taxa_taker_efetiva = float(perfil_taxas.get("taker_decimal_efetiva", 0.0) or 0.0)
-    if taxa_taker_efetiva > 0.0:
-        ajustes_exec["signal_trade_fee_pct"] = taxa_taker_efetiva
-    return ajustes_exec
+    # Delega à fonte única em fee_optimizer (INC-03) — mesma taxa efetiva em todos os caminhos.
+    return aplicar_taxa_efetiva(ajustes_sinal, perfil_taxas)
 
 
-def _ajustes_microtrading_auto(
-    ajustes_sinal: dict[str, Any],
-    *,
-    notional_usdt: float,
-    lucro_liquido_minimo_usdt: float,
-    state: dict[str, Any] | None = None,
-    modo_testnet: bool = False,
-) -> dict[str, Any]:
-    ajustes_auto = dict(ajustes_sinal)
-    notional_base = max(0.0, float(notional_usdt or 0.0))
-    # Hard floor $0.01 em qualquer modo
-    lucro_minimo_usdt = max(0.01, float(lucro_liquido_minimo_usdt or 0.01))
-    piso_lucro_pct = _piso_lucro_percentual(
-        ajustes_auto,
-        notional_usdt=notional_base,
-        lucro_liquido_minimo_usdt=lucro_minimo_usdt,
-    )
-    ajustes_auto["auto_lucro_liquido_minimo_usdt"] = lucro_minimo_usdt
-    ajustes_auto["signal_min_net_profit_pct"] = max(0.0002, piso_lucro_pct)
-    # Thresholds agressivos para scalping
-    ajustes_auto["signal_confirm_threshold"] = max(int(ajustes_auto.get("signal_confirm_threshold", 1) or 1), 1)
-    ajustes_auto["signal_decision_window_minutes"] = max(int(ajustes_auto.get("signal_decision_window_minutes", 5) or 5), 1)
-    ajustes_auto["limiar_score_operacao"] = max(float(ajustes_auto.get("limiar_score_operacao", 0.18) or 0.18), 0.15)
-    ajustes_auto["limiar_variacao_numerica"] = max(float(ajustes_auto.get("limiar_variacao_numerica", 0.0015) or 0.0015), 0.001)
-    ev_minimo = max(float(ajustes_auto.get("signal_min_ev", 0.0001) or 0.0001), max(0.0001, piso_lucro_pct * 0.30))
-    prob_minima = max(float(ajustes_auto.get("signal_min_prob", 0.55) or 0.55), 0.50)
-    ajustes_auto["signal_min_ev"] = ev_minimo
-    ajustes_auto["signal_min_prob"] = prob_minima
-    # Autoajuste rápido baseado no histórico local (complementar ao ControladorAdaptativo)
-    historico = list(((state or {}).get("historico_ciclos")) or [])[-6:]
-    if historico:
-        ganhos = [float(item.get("lucro_liquido_usdt", 0.0) or 0.0) for item in historico]
-        retornos = [float(item.get("retorno_liquido_pct", 0.0) or 0.0) for item in historico]
-        win_rate = sum(1 for item in ganhos if item > 0.0) / max(len(ganhos), 1)
-        lucro_medio = sum(ganhos) / max(len(ganhos), 1)
-        retorno_medio = sum(retornos) / max(len(retornos), 1)
-        if win_rate >= 0.75 and lucro_medio > lucro_minimo_usdt and retorno_medio > piso_lucro_pct:
-            ajustes_auto["signal_min_prob"] = max(0.50, float(ajustes_auto["signal_min_prob"]) - 0.008)
-            ajustes_auto["signal_min_ev"] = max(0.0001, float(ajustes_auto["signal_min_ev"]) * 0.92)
-            ajustes_auto["limiar_score_operacao"] = max(0.13, float(ajustes_auto["limiar_score_operacao"]) - 0.01)
-            ajustes_auto["signal_min_net_profit_pct"] = max(0.0002, float(ajustes_auto["signal_min_net_profit_pct"]) * 0.92)
-        elif win_rate <= 0.50 or lucro_medio <= 0.0 or retorno_medio <= 0.0:
-            ajustes_auto["signal_min_prob"] = min(0.65, float(ajustes_auto["signal_min_prob"]) + 0.01)
-            ajustes_auto["signal_min_ev"] = min(0.001, float(ajustes_auto["signal_min_ev"]) * 1.08)
-            ajustes_auto["limiar_score_operacao"] = min(0.25, float(ajustes_auto["limiar_score_operacao"]) + 0.01)
-            ajustes_auto["signal_min_net_profit_pct"] = min(0.002, float(ajustes_auto["signal_min_net_profit_pct"]) * 1.08)
-    return ajustes_auto
+# _ajustes_microtrading_auto extraído para src/autotrader/configurador.py (FASE 6) — re-exportado no topo.
 
 
 def _registrar_contexto_entrada_ciclo(state: dict[str, Any], *, sinal: SignalDecision) -> None:
     previsao_modelo = dict(sinal.detalhe.get("previsao_modelo") or {})
     state["ciclo_features_entrada"] = dict(sinal.features or {})
+    # regime/estrategia não são campos padrão de SignalDecision → caem em `detalhe`.
+    # Capturados aqui na ENTRADA para rotular o resultado do trade no fechamento (ML).
+    state["ciclo_regime"] = sinal.detalhe.get("regime")
+    state["ciclo_estrategia"] = sinal.detalhe.get("estrategia")
     state["ciclo_previsao_ts"] = int(sinal.ts or int(time.time() * 1000))
     state["ciclo_previsao_y_hat"] = float(
         previsao_modelo.get("y_cal", previsao_modelo.get("y_hat", state.get("ciclo_preco_entrada", 0.0))) or 0.0
@@ -748,6 +671,78 @@ def _saldo_base_gerenciado(state: dict[str, Any], saldo_base_total: float) -> fl
     return min(max(0.0, saldo_base_total), quantidade_ciclo)
 
 
+def _aplicar_modo_exploracao(
+    ajustes_risco: dict[str, Any],
+    ajustes_sinal: dict[str, Any],
+    *,
+    modo_testnet: bool,
+) -> bool:
+    """Modo exploração (`AUTO_MODO_EXPLORACAO=true`): relaxa pisos de lucro/EV e thresholds de
+    sinal para o micro-trading 1-15m OPERAR de fato, aceitando EV potencialmente NEGATIVO.
+
+    ⚠️ TESTNET-ONLY POR CONSTRUÇÃO: recusa engatar se não for testnet ou se
+    `PERMITIR_CONTA_REAL=true`. Dinheiro real NUNCA opera EV negativo (dupla trava: aqui +
+    `_usuario_virtual`). Loga aviso alto. Retorna True se engatou."""
+    if os.getenv("AUTO_MODO_EXPLORACAO", "false").lower() != "true":
+        return False
+    conta_real_ligada = os.getenv("PERMITIR_CONTA_REAL", "false").lower() == "true"
+    if not modo_testnet or conta_real_ligada:
+        LOG.error(
+            "modo_exploracao_recusado_fora_de_testnet",
+            extra={"modo_testnet": modo_testnet, "permitir_conta_real": conta_real_ligada},
+        )
+        return False
+    # Pisos relaxados (o enforcement testnet-only definitivo está em _usuario_virtual).
+    ajustes_risco["permitir_ev_negativo"] = True
+    ajustes_risco["filtro_ev_minimo_usdt"] = -1e9
+    ajustes_risco["lucro_liquido_minimo"] = -1.0
+    ajustes_risco["lucro_liquido_minimo_usdt"] = -1e9
+    # Thresholds de sinal relaxados p/ o scanner emitir BUY/SELL operável.
+    ajustes_sinal["signal_min_net_profit_pct"] = -1.0
+    ajustes_sinal["signal_min_ev"] = -1e9
+    ajustes_sinal["signal_min_prob"] = 0.0
+    ajustes_sinal["auto_lucro_liquido_minimo_usdt"] = 0.0
+    ajustes_sinal["modo_exploracao"] = True  # zera o piso de saída em _limites_lucro_ciclo
+    LOG.warning(
+        "modo_exploracao_ativo",
+        extra={"aviso": "micro-trading 1-15m OPERANDO com EV potencialmente NEGATIVO (testnet)"},
+    )
+    return True
+
+
+def _resetar_perda_diaria_se_novo_dia(state: dict[str, Any]) -> None:
+    """Zera a perda diária quando o dia operacional vira — mantém o semantic 'diário'
+    do breaker de perda. Sem isso, num run multi-dia a 'perda diária' viraria
+    'perda cumulativa' e travaria o bot cedo demais. NÃO destrava `circuit_tripped`
+    (reset de halt é só humano, DA-03/DA-13): um dia ruim continua exigindo revisão."""
+    hoje = _data_operacional()
+    if str(state.get("daily_loss_data") or "") != hoje:
+        state["daily_loss_data"] = hoje
+        state["daily_loss_usdt"] = 0.0
+
+
+# Status de ordem Binance que comprovam execução efetiva (recebeu base/quote).
+_STATUS_ORDEM_PREENCHIDA = frozenset({"FILLED", "PARTIALLY_FILLED"})
+
+
+def _ordem_foi_preenchida(ordem: dict[str, Any] | None) -> bool:
+    """True se a ordem foi REALMENTE executada — guarda anti-posição-fantasma.
+
+    Aceita por status (FILLED/PARTIALLY_FILLED) OU por quantidade executada > 0:
+    cobre tanto a resposta real da Binance quanto respostas que omitem o status.
+    Só retorna False quando não há nenhum sinal de preenchimento — caso em que
+    abrir/encerrar ciclo criaria estado divergente do saldo real (causa-raiz #2 do run).
+    """
+    if not isinstance(ordem, dict):
+        return False
+    if str(ordem.get("status", "") or "").upper() in _STATUS_ORDEM_PREENCHIDA:
+        return True
+    try:
+        return float(ordem.get("executedQty", 0.0) or 0.0) > 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _abrir_ciclo(
     state: dict[str, Any],
     *,
@@ -776,6 +771,8 @@ def _abrir_ciclo(
     state["ciclo_lucro_minimo_usdt"] = 0.0
     state["ciclo_trailing_retracao_pct"] = 0.0
     state["ciclo_custos_estimados_pct"] = 0.0
+    state["ciclo_ordem_id_compra"] = None   # novo ciclo: sem ordens ainda (P2)
+    state["ciclo_ordem_id_venda"] = None
     state["saldo_legado_detectado"] = False
     state["ultimo_ciclo_encerrado_ts"] = 0
     state["ultimo_ciclo_motivo_encerramento"] = None
@@ -822,6 +819,10 @@ def _encerrar_ciclo(state: dict[str, Any], *, motivo: str, agora_ms: int) -> Non
     state["perfil_ciclo_nome"] = None
     state["perfil_ciclo_capital_usdt"] = 0.0
     state["perfil_ciclo_lucro_minimo_usdt"] = 0.0
+    # Limpa os ids de ordem do ciclo (P2): o resultado já foi anexado em _registrar_fechamento_ciclo,
+    # que roda ANTES daqui. Evita anexar lucro do próximo ciclo a uma ordem antiga.
+    state["ciclo_ordem_id_compra"] = None
+    state["ciclo_ordem_id_venda"] = None
 
 
 def _atualizar_monitoramento_ciclo(state: dict[str, Any], *, saldo_base: float, preco_atual: float) -> None:
@@ -886,11 +887,16 @@ def _limites_lucro_ciclo(
 ) -> dict[str, float]:
     perfil = dict(perfil or {})
     minimo_pct_cfg = max(0.0, float(ajustes_sinal.get("signal_min_net_profit_pct", 0.002) or 0.0))
-    minimo_usdt_cfg = max(
-        0.01,
-        float(ajustes_sinal.get("auto_lucro_liquido_minimo_usdt", 0.01) or 0.01),
-        float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0),
-    )
+    # Modo exploração (testnet) zera o piso de saída p/ o micro-trading 1-15m ciclar de fato
+    # (sai em qualquer lucro/stop); fora dele, hard floor de $0.01. Ver _aplicar_modo_exploracao.
+    if bool(ajustes_sinal.get("modo_exploracao")):
+        minimo_usdt_cfg = max(0.0, float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0))
+    else:
+        minimo_usdt_cfg = max(
+            0.01,
+            float(ajustes_sinal.get("auto_lucro_liquido_minimo_usdt", 0.01) or 0.01),
+            float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0),
+        )
     incremento_alvo_pct = max(0.0, float(perfil.get("incremento_alvo_pct", 0.0) or 0.0))
     minimo_pct_cfg *= 1.0 + incremento_alvo_pct
     minimo_usdt = max(minimo_usdt_cfg, notional_entrada * minimo_pct_cfg)
@@ -943,8 +949,12 @@ def _avaliar_saida_ciclo(
         and metricas["retorno_liquido_pct"] >= limites["minimo_pct"]
     )
 
+    # Stop-loss ATIVO por padrão: cortar a perda antes que ela cresça ("sair antes de
+    # prejuízo"). Segurar um perdedor indefinidamente é o comportamento perigoso — só é
+    # mantido se AUTO_SEGURAR_NO_PREJUIZO=true (opt-in explícito, desaconselhado).
+    segurar_no_prejuizo = os.getenv("AUTO_SEGURAR_NO_PREJUIZO", "false").lower() == "true"
     if float(state.get("ciclo_retorno_aberto_pct", 0.0) or 0.0) <= -stop_protecao_pct:
-        if not False:
+        if segurar_no_prejuizo:
             return {
                 "vender": False,
                 "motivo": "prejuizo_liquido_bloqueado",
@@ -1157,6 +1167,10 @@ def _novo_estado(config: dict[str, Any]) -> dict[str, Any]:
         "ultimo_ciclo_encerrado_ts": 0,
         "ultimo_ciclo_motivo_encerramento": None,
         "ciclo_features_entrada": {},
+        "ciclo_regime": None,
+        "ciclo_estrategia": None,
+        "ciclo_ordem_id_compra": None,
+        "ciclo_ordem_id_venda": None,
         "ciclo_previsao_ts": 0,
         "ciclo_previsao_y_hat": 0.0,
         "historico_ciclos": [],
@@ -1166,6 +1180,7 @@ def _novo_estado(config: dict[str, Any]) -> dict[str, Any]:
         "consecutive_errors": 0,
         "circuit_tripped": False,
         "daily_loss_usdt": 0.0,
+        "daily_loss_data": None,
         "max_daily_loss_usdt": float(config.get("max_daily_loss_usdt") or 50.0),
         "consecutive_errors_limit": int(config.get("consecutive_errors_limit", 5) or 5),
         "pares_estado": {},
@@ -1223,25 +1238,7 @@ def _espelhar_estado_par_no_global(estado_global: dict[str, Any], estado_par: di
         estado_global[chave] = copy.deepcopy(valor)
 
 
-def _usuario_virtual(ajustes_risco: dict[str, Any], *, modo_testnet: bool) -> dict[str, Any]:
-    risk_config = dict(ajustes_risco)
-    # Não limitar max_trades_abertos/hora — o ControladorAdaptativo gerencia isso
-    risk_config["bloquear_flip_flop"] = True
-    risk_config["max_exposicao_ativo"] = min(max(0.0, float(risk_config.get("max_exposicao_ativo", 0.20) or 0.20)), 0.20)
-    risk_config["risk_per_trade"] = min(max(0.0, float(risk_config.get("risk_per_trade", 0.005) or 0.005)), 0.005)
-    risk_config["max_loss_trade_usdt"] = min(max(0.01, float(risk_config.get("max_loss_trade_usdt", 0.20) or 0.20)), 0.20)
-    risk_config["modo_testnet"] = bool(modo_testnet)
-    # Hard floor: lucro minimo $0.01
-    risk_config["lucro_liquido_minimo"] = max(0.0002, float(risk_config.get("lucro_liquido_minimo", 0.0005) or 0.0002))
-    risk_config["lucro_liquido_minimo_usdt"] = max(0.01, float(risk_config.get("lucro_liquido_minimo_usdt", 0.01) or 0.01))
-    risk_config["filtro_ev_minimo_usdt"] = max(0.01, float(risk_config.get("filtro_ev_minimo_usdt", 0.01) or 0.01))
-    return {
-        "id": 0,
-        "nome": "auto_trader",
-        "testnet": bool(modo_testnet),
-        "ativo": True,
-        "risk_config": risk_config,
-    }
+# _usuario_virtual extraído para src/autotrader/configurador.py (FASE 6) — re-exportado no topo.
 
 
 def _estado_execucao_atual(
@@ -1471,6 +1468,67 @@ class TestnetAutoTrader:
             },
         )
 
+    async def _gate_edge_conta_real(self, simbolo: str) -> Any:
+        """Gate de EDGE para conta REAL — só libera entrada se houver edge validado e fresco.
+
+        FAIL-CLOSED: qualquer erro ao consultar o gate ⇒ tratado como NEGADO (capital perdido
+        não volta). Testnet/exploração NÃO chamam este gate (ver `_executar_ciclo`). Esta é uma
+        camada INDEPENDENTE de segurança financeira (defense in depth), além de PERMITIR_CONTA_REAL.
+        """
+        from src.risco.edge_config import ResultadoGateEdge, edge_aprovado_conta_real
+
+        try:
+            return await edge_aprovado_conta_real(simbolo)
+        except Exception as exc:  # fail-closed: erro no gate NUNCA libera dinheiro real
+            LOG.error(
+                "falha_gate_edge_fail_closed",
+                extra={"simbolo": simbolo, "erro": str(exc)},
+            )
+            return ResultadoGateEdge(False, "erro_no_gate_fail_closed", {"erro": str(exc)})
+
+    async def _persistir_ordem_executada(
+        self,
+        *,
+        simbolo: str,
+        lado: str,
+        modo_testnet: bool,
+        preco: float,
+        quantidade: float,
+        notional: float,
+        aprovacao: Any,
+        ordem: dict[str, Any],
+    ) -> int | None:
+        """Persiste uma execução na tabela `ordens` (P2) — visibilidade na UI + base p/ ML.
+
+        Best-effort: falha aqui NÃO derruba o ciclo, mas é logada (não silenciada). Retorna
+        o id da ordem persistida (para anexar o resultado no fechamento) ou None."""
+        try:
+            return await RepositorioOrdens.criar(
+                usuario_id=None,
+                simbolo=simbolo,
+                lado=lado,
+                status="EXECUTADA",
+                modo="testnet" if modo_testnet else "real",
+                preco_referencia=float(preco or 0.0) or None,
+                quantidade=float(quantidade or 0.0) or None,
+                notional=float(notional or 0.0) or None,
+                stop_loss_pct=float(getattr(aprovacao, "stop_loss_pct", 0.0) or 0.0) or None,
+                take_profit_pct=float(getattr(aprovacao, "take_profit_pct", 0.0) or 0.0) or None,
+                detalhe={
+                    "origem": "auto_trader",
+                    "order_id_binance": ordem.get("orderId"),
+                    "status_binance": ordem.get("status"),
+                    "client_order_id": ordem.get("clientOrderId"),
+                    "executed_qty": ordem.get("executedQty"),
+                },
+            )
+        except Exception as exc:
+            LOG.warning(
+                "falha_persistir_ordem_executada",
+                extra={"simbolo": simbolo, "lado": lado, "erro": str(exc)},
+            )
+            return None
+
     async def _registrar_fechamento_ciclo(
         self,
         *,
@@ -1505,8 +1563,11 @@ class TestnetAutoTrader:
         if ordem_id and lucro_liquido_usdt != 0.0:
             try:
                 capital_pct = state.get("capital_pct_atual")
-                regime = (state.get("ultimo_sinal") or {}).get("regime")
-                estrategia = (state.get("ultimo_sinal") or {}).get("estrategia")
+                # Fonte correta: regime/estrategia capturados na entrada do ciclo.
+                # (Antes lia `ultimo_sinal` — que é uma STRING — e lançava AttributeError
+                #  silenciado pelo except, deixando o resultado da ordem sem rótulo de ML.)
+                regime = state.get("ciclo_regime")
+                estrategia = state.get("ciclo_estrategia")
                 await RepositorioOrdens.registrar_resultado(
                     int(ordem_id),
                     lucro_usdt=lucro_liquido_usdt,
@@ -1516,8 +1577,9 @@ class TestnetAutoTrader:
                     regime=regime,
                     estrategia=estrategia,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort: não derruba o ciclo, mas NÃO silencia — log p/ diagnose em run longo.
+                LOG.warning("falha_registrar_resultado_ordem", extra={"simbolo": simbolo, "ordem_id": ordem_id, "erro": str(exc)})
         # Registrar resultado no ControladorAdaptativo para autoajuste
         try:
             self._controlador.registrar_ciclo(
@@ -1526,8 +1588,9 @@ class TestnetAutoTrader:
                 executado=True,
                 motivos_rejeicao=[motivo] if lucro_liquido_usdt <= 0 else [],
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            # Best-effort: autoajuste não deve derrubar o ciclo, mas não silenciar (run longo).
+            LOG.warning("falha_registrar_ciclo_controlador", extra={"simbolo": simbolo, "erro": str(exc)})
 
         features_entrada = dict(state.get("ciclo_features_entrada") or {})
         y_hat = float(state.get("ciclo_previsao_y_hat", 0.0) or 0.0)
@@ -1625,6 +1688,10 @@ class TestnetAutoTrader:
         ajustes_sinal_base["signal_slippage_pct"] = params_adaptativos["slippage_pct"]
         ajustes_sinal_base["signal_trade_fee_pct"] = params_adaptativos["signal_trade_fee_pct"]
         ajustes_sinal_base["signal_decision_window_minutes"] = params_adaptativos["signal_decision_window_minutes"]
+        # Modo exploração (testnet-only): relaxa pisos p/ o micro-trading 1-15m operar de fato.
+        estado_global["modo_exploracao_ativo"] = _aplicar_modo_exploracao(
+            ajustes_risco, ajustes_sinal_base, modo_testnet=modo_testnet
+        )
         conta_raw = await cliente_conta.obter_conta_raw()
         monitoramento_multiativo = await montar_monitoramento_multiativo(
             sessao=sessao,
@@ -2201,6 +2268,26 @@ class TestnetAutoTrader:
 
         ordem = None
         if acao_execucao == "BUY":
+            # GATE DE EDGE (GRD/QNT) — só ABERTURA de posição em conta REAL. Sem edge líquido
+            # validado e fresco para o símbolo, não se arrisca capital real (default-closed,
+            # fail-closed). Testnet/exploração ficam de fora (coleta/validação, sem capital).
+            # SAÍDAS (SELL) nunca passam por aqui: travar uma venda prenderia capital.
+            if not modo_testnet:
+                gate_edge = await self._gate_edge_conta_real(simbolo)
+                if not getattr(gate_edge, "aprovado", False):
+                    state["ultima_acao"] = "HOLD"
+                    state["ultimo_motivo"] = f"edge_nao_validado:{getattr(gate_edge, 'motivo', 'desconhecido')}"
+                    await self._registrar_evento(
+                        simbolo=simbolo,
+                        state=state,
+                        payload={
+                            "resultado": "sem_execucao",
+                            "motivo": state["ultimo_motivo"],
+                            "edge": getattr(gate_edge, "detalhe", {}),
+                        },
+                    )
+                    _espelhar_estado_corrente()
+                    return
             notional_compra_usdt = min(
                 max(0.0, float(aprovacao.notional_sugerido or 0.0)),
                 max(0.0, saldo_quote_livre_usdt),
@@ -2302,6 +2389,30 @@ class TestnetAutoTrader:
                 ordem = await ger.criar_ordem_market(simbolo, "BUY", quantidade=quantidade)
                 notional_executado_usdt = max(quantidade * preco_atual_par * preco_quote_usdt, notional_compra_usdt)
             quantidade_comprada = float(ordem.get("executedQty", 0.0) or 0.0)
+            # Guarda anti-fantasma (causa-raiz #2 do run 13-18h): só abrir ciclo se a ordem
+            # foi REALMENTE preenchida. Se voltar NEW/EXPIRED/REJECTED com executedQty=0, abrir
+            # com quantidade teórica criaria ciclo_ativo sem ativo real → trava em
+            # 'limite_trades_abertos'. A reconciliação do próximo loop assume a posição se o
+            # fill chegar atrasado.
+            if not _ordem_foi_preenchida(ordem):
+                LOG.warning(
+                    "ordem_buy_nao_preenchida",
+                    extra={"simbolo": simbolo, "status": ordem.get("status"), "executedQty": quantidade_comprada},
+                )
+                state["ultima_acao"] = "HOLD"
+                state["ultimo_motivo"] = "ordem_compra_nao_preenchida"
+                await self._registrar_evento(
+                    simbolo=simbolo,
+                    state=state,
+                    payload={
+                        "resultado": "sem_execucao",
+                        "motivo": state["ultimo_motivo"],
+                        "ordem": {"id": ordem.get("orderId"), "status": ordem.get("status")},
+                        "plano_execucao": plano.to_dict(),
+                    },
+                )
+                _espelhar_estado_corrente()
+                return
             if quantidade_comprada <= 0.0:
                 quantidade_comprada = float(plano.simulacao_ordem.get("quantidade", 0.0) or 0.0)
             if quantidade_comprada <= 0.0 and preco_atual_usdt > 0.0:
@@ -2317,6 +2428,14 @@ class TestnetAutoTrader:
             )
             _registrar_contexto_entrada_ciclo(state, sinal=sinal)
             _atualizar_monitoramento_ciclo(state, saldo_base=quantidade_comprada, preco_atual=preco_atual_usdt)
+            # P2: persiste a COMPRA na tabela `ordens` (visibilidade na UI + base p/ ML).
+            ordem_id_compra = await self._persistir_ordem_executada(
+                simbolo=simbolo, lado="BUY", modo_testnet=modo_testnet,
+                preco=preco_atual_usdt, quantidade=quantidade_comprada, notional=notional_executado_usdt,
+                aprovacao=aprovacao, ordem=ordem,
+            )
+            if ordem_id_compra is not None:
+                state["ciclo_ordem_id_compra"] = ordem_id_compra
         else:
             quantidade_base_venda = max(0.0, saldo_base) if ciclo_ativo else quantidade_venda_inicial
             quantidade = ger.ajustar_quantidade(quantidade_base_venda, step_size, min_qty)
@@ -2360,6 +2479,37 @@ class TestnetAutoTrader:
                 )
                 _espelhar_estado_corrente()
                 return
+            # Guarda anti-fantasma na saída: se a venda NÃO preencheu, NÃO encerrar o ciclo —
+            # encerrar registraria lucro inexistente e o bot acharia estar zerado ainda segurando
+            # o ativo. Mantém o ciclo aberto; o próximo loop reavalia a saída.
+            if not _ordem_foi_preenchida(ordem):
+                LOG.warning(
+                    "ordem_sell_nao_preenchida",
+                    extra={"simbolo": simbolo, "status": ordem.get("status"), "executedQty": ordem.get("executedQty")},
+                )
+                state["ultima_acao"] = "HOLD"
+                state["ultimo_motivo"] = "ordem_venda_nao_preenchida"
+                await self._registrar_evento(
+                    simbolo=simbolo,
+                    state=state,
+                    payload={
+                        "resultado": "sem_execucao",
+                        "motivo": state["ultimo_motivo"],
+                        "ordem": {"id": ordem.get("orderId"), "status": ordem.get("status")},
+                        "plano_execucao": plano.to_dict(),
+                    },
+                )
+                _espelhar_estado_corrente()
+                return
+            # P2: persiste a VENDA na tabela `ordens` ANTES do fechamento, para o
+            # _registrar_fechamento_ciclo anexar o lucro realizado a esta ordem.
+            ordem_id_venda = await self._persistir_ordem_executada(
+                simbolo=simbolo, lado="SELL", modo_testnet=modo_testnet,
+                preco=preco_atual_usdt, quantidade=quantidade, notional=quantidade * preco_atual_usdt,
+                aprovacao=aprovacao, ordem=ordem,
+            )
+            if ordem_id_venda is not None:
+                state["ciclo_ordem_id_venda"] = ordem_id_venda
             if ciclo_ativo:
                 await self._registrar_fechamento_ciclo(
                     simbolo=simbolo,
@@ -2425,6 +2575,8 @@ class TestnetAutoTrader:
                     LOG.error("circuit_breaker_acionado", extra={"token": token, "simbolo": state.get("simbolo")})
                     await asyncio.sleep(30)
                     continue
+                # Reset do contador de perda diária no virar do dia (semantic 'diário').
+                _resetar_perda_diaria_se_novo_dia(state)
                 try:
                     await self._executar_ciclo(
                         token=token,

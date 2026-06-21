@@ -8,6 +8,18 @@ version = "0.2.0"
 description = "Plataforma local de analise e automacao do projeto Oraculo"
 requires-python = ">=3.11"
 
+# Dependencias de runtime continuam pinadas em requirements.txt (fonte unica).
+# Instalar runtime:  pip install -r requirements.txt
+# Instalar ferramentas de qualidade:  pip install -e ".[dev]"
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.13",
+    "ruff>=0.8",
+    "black>=24.10",
+    "isort>=5.13",
+    "pytest-cov>=6.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["src*"]
 
@@ -16,3 +28,30 @@ testpaths = ["tests"]
 addopts = "-p no:cacheprovider -p no:tmpdir"
 asyncio_mode = "auto"
 norecursedirs = [".venv", ".pytest_cache", ".pytest_tmp", ".tmp_pytest", "_pytest_work", "pytest_work"]
+
+# --- Ferramentas de qualidade (metas do CLAUDE.md / Fase 9) ---
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = isort, B = bugbear, UP = pyupgrade, SIM = simplify
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]  # comprimento de linha ja tratado por black
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+files = ["src"]

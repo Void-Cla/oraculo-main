@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from src.binance_api.cliente import ClienteBinance
 from src.binance_api.coletor_velas_rest import coletar_e_persistir
+from src.core.validacao_config import exigir_config_valida
 from src.executor.gerenciador_ordens import GerenciadorOrdens
 from src.modelagem.gerenciador_modelo import GerenciadorModelo
 from src.multiativo.config import validar_par_monitorado
@@ -72,10 +73,12 @@ from src.servicos.noticias import obter_noticias_para_peso, renderizar_fonte_not
 from src.servicos.painel_conta import montar_painel_conta
 from src.servicos.sessoes import criar_sessao_binance, encerrar_sessao, obter_sessao
 from src.servicos.testnet_auto_trader import TestnetAutoTrader
-from src.servicos.ai_advisor import obter_insight, persistir_insight
+from src.servicos.ai_advisor import obter_insight, persistir_insight, saude_llm
+from src.observabilidade.saude_modelo import saude_modelo
 from src.sinais.fila_sinais import fila_sinais_global
 from src.tarefas.tarefas_previsao import gerar_previsao_dados_persistidos, gerar_previsao_por_klines, loop_previsao
 from src.tarefas.consumidor_sinais import loop_consumidor_sinais
+from src.tarefas.coletor_continuo import loop_coleta_continua
 from src.tarefas.carga_teste_rapida import executar_carga_testes
 from src.tarefas.observacao import aguardar_observacao
 from src.tarefas.recalibracao_startup import recalibrar_ao_religar
@@ -259,6 +262,9 @@ async def _verificar_fila_pendente() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail-fast (PSF-01): recusa iniciar com configuração crítica inválida/ambígua,
+    # em vez de descobrir o problema horas depois operando com dinheiro.
+    exigir_config_valida()
     caminho = inicializar_db()
     tarefa_loop: asyncio.Task | None = None
     tarefa_consumidor: asyncio.Task | None = None
@@ -279,10 +285,14 @@ async def lifespan(app: FastAPI):
             )
     if os.getenv("ATIVAR_CARGA_TESTE", "false").lower() == "true":
         tarefa_carga_teste = asyncio.create_task(executar_carga_testes())
+    tarefa_coleta: asyncio.Task | None = None
+    if os.getenv("ATIVAR_COLETA_CONTINUA", "false").lower() == "true":
+        tarefa_coleta = asyncio.create_task(loop_coleta_continua())
     app.state.tarefa_loop = tarefa_loop
     app.state.tarefa_consumidor = tarefa_consumidor
     app.state.tarefa_carga_teste = tarefa_carga_teste
     app.state.tarefa_observacao = tarefa_observacao
+    app.state.tarefa_coleta = tarefa_coleta
     LOG.info(
         "app_iniciada",
         extra={
@@ -306,6 +316,9 @@ async def lifespan(app: FastAPI):
         if tarefa_observacao is not None:
             tarefa_observacao.cancel()
             await asyncio.gather(tarefa_observacao, return_exceptions=True)
+        if tarefa_coleta is not None:
+            tarefa_coleta.cancel()
+            await asyncio.gather(tarefa_coleta, return_exceptions=True)
         await TESTNET_TRADER.encerrar_todos()
         LOG.info("app_finalizada")
 
@@ -464,6 +477,43 @@ async def status_modelo(simbolo: str = "BTCUSDT") -> dict[str, Any]:
     return _modelo_status(simbolo)
 
 
+@app.get("/v1/modelos/treino")
+async def status_treino_online(simbolo: str = "BTCUSDT", limite: int = 200) -> dict[str, Any]:
+    """Saúde do treino online em runtime: gate de amostras, divergência (coef_norm),
+    online em uso, e qualidade recente (IC predição×realidade do banco)."""
+    return await saude_modelo(_simbolo_monitorado(simbolo), limite)
+
+
+@app.get("/v1/ai/saude")
+async def status_llm(simbolo: str | None = None) -> dict[str, Any]:
+    """Vida do LLM: chave presente, modo fallback (heurística local) e último insight."""
+    return await saude_llm(simbolo)
+
+
+@app.get("/v1/edge")
+async def status_edge() -> dict[str, Any]:
+    """Governança de edge: quais símbolos têm edge líquido VALIDADO e FRESCO (gate de conta
+    real). Vazio/sem aprovados = bot opera apenas testnet/exploração (fail-safe)."""
+    from src.risco.edge_config import resumo_edge
+
+    return await resumo_edge()
+
+
+@app.get("/v1/diagnostico")
+async def diagnostico(simbolo: str = "BTCUSDT") -> dict[str, Any]:
+    """Visão consolidada para monitorar o bot ao vivo: health + treino online + LLM + edge."""
+    from src.risco.edge_config import resumo_edge
+
+    sim = _simbolo_monitorado(simbolo)
+    return {
+        "health": await health(),
+        "modelo_treino": await saude_modelo(sim),
+        "llm": await saude_llm(sim),
+        "edge": await resumo_edge(),
+        "ts": int(time.time() * 1000),
+    }
+
+
 @app.post("/v1/sessao/entrar")
 async def entrar_sessao(entrada: SessaoEntrada, response: Response) -> dict[str, Any]:
     modo = "testnet" if entrada.testnet else "real"
@@ -493,7 +543,9 @@ async def entrar_sessao(entrada: SessaoEntrada, response: Response) -> dict[str,
 @app.get("/v1/sessao/status")
 async def status_sessao(request: Request) -> dict[str, Any]:
     token = request.cookies.get("oraculo_sessao")
-    sessao = await obter_sessao(token)
+    # SEC-01: endpoint de status NÃO precisa de credenciais → não as retira do store
+    # (defesa em profundidade: segredo que não sai do store não vaza em log/resposta).
+    sessao = await obter_sessao(token, incluir_credenciais=False)
     if sessao is None:
         return {"autenticado": False}
     payload = {"autenticado": True, **{k: v for k, v in sessao.items() if k not in {"api_key", "api_secret"}}}

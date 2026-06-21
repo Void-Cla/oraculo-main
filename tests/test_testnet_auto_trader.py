@@ -5,10 +5,12 @@ from src.servicos.testnet_auto_trader import (
     _ajustes_microtrading_auto,
     _aplicar_teto_notional,
     _avaliar_saida_ciclo,
+    _data_operacional,
     _definir_proxima_acao_esperada,
     _limites_lucro_ciclo,
     _novo_estado,
     _ranquear_simbolos_monitorados,
+    _resetar_perda_diaria_se_novo_dia,
     _selecionar_simbolo_foco,
     _usuario_virtual,
 )
@@ -124,47 +126,9 @@ def test_saida_ciclo_nao_aciona_stop_apenas_por_custos_operacionais():
     assert resultado["motivo"] == "aguardando_lucro_minimo_liquido"
 
 
-def test_saida_ciclo_bloqueia_stop_com_prejuizo_por_padrao(monkeypatch):
-    monkeypatch.setenv("AUTO_PERMITIR_STOP_COM_PREJUIZO", "false")
-    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
-    state.update(
-        {
-            "ciclo_ativo": True,
-            "ciclo_quantidade": 0.01,
-            "ciclo_preco_entrada": 10000.0,
-            "ciclo_notional_entrada": 100.0,
-            "ciclo_iniciado_ts": 1,
-            "ciclo_preco_pico": 10000.0,
-        }
-    )
-    sinal = SignalDecision.from_mapping(
-        {
-            "simbolo": "BTCUSDT",
-            "acao": "HOLD",
-            "ts": 2,
-            "confianca": 0.7,
-            "stop_loss_pct": 0.002,
-            "take_profit_pct": 0.01,
-            "lucro_liquido_esperado_pct": 0.0,
-            "features": {"close": 9970.0, "spread_rel": 0.0},
-        }
-    )
-
-    resultado = _avaliar_saida_ciclo(
-        state=state,
-        sinal=sinal,
-        ajustes_sinal={"signal_trade_fee_pct": 0.0012, "signal_slippage_pct": 0.0005},
-        saldo_base=0.01,
-        preco_atual=9970.0,
-        perfil={"stop_protecao_pct": 0.002},
-    )
-
-    assert resultado["vender"] is False
-    assert resultado["motivo"] == "prejuizo_liquido_bloqueado"
-
-
-def test_saida_ciclo_permite_stop_com_prejuizo_somente_por_flag(monkeypatch):
-    monkeypatch.setenv("AUTO_PERMITIR_STOP_COM_PREJUIZO", "true")
+def test_saida_ciclo_corta_perda_por_padrao(monkeypatch):
+    # Default seguro (sair antes de prejuízo): sem opt-in, o stop-loss CORTA a perda.
+    monkeypatch.delenv("AUTO_SEGURAR_NO_PREJUIZO", raising=False)
     state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
     state.update(
         {
@@ -200,6 +164,46 @@ def test_saida_ciclo_permite_stop_com_prejuizo_somente_por_flag(monkeypatch):
 
     assert resultado["vender"] is True
     assert resultado["motivo"] == "stop_protecao_acionado"
+
+
+def test_saida_ciclo_segura_no_prejuizo_apenas_com_opt_in(monkeypatch):
+    # Comportamento antigo (segurar perdedor) só com opt-in explícito e desaconselhado.
+    monkeypatch.setenv("AUTO_SEGURAR_NO_PREJUIZO", "true")
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
+    state.update(
+        {
+            "ciclo_ativo": True,
+            "ciclo_quantidade": 0.01,
+            "ciclo_preco_entrada": 10000.0,
+            "ciclo_notional_entrada": 100.0,
+            "ciclo_iniciado_ts": 1,
+            "ciclo_preco_pico": 10000.0,
+        }
+    )
+    sinal = SignalDecision.from_mapping(
+        {
+            "simbolo": "BTCUSDT",
+            "acao": "HOLD",
+            "ts": 2,
+            "confianca": 0.7,
+            "stop_loss_pct": 0.002,
+            "take_profit_pct": 0.01,
+            "lucro_liquido_esperado_pct": 0.0,
+            "features": {"close": 9970.0, "spread_rel": 0.0},
+        }
+    )
+
+    resultado = _avaliar_saida_ciclo(
+        state=state,
+        sinal=sinal,
+        ajustes_sinal={"signal_trade_fee_pct": 0.0012, "signal_slippage_pct": 0.0005},
+        saldo_base=0.01,
+        preco_atual=9970.0,
+        perfil={"stop_protecao_pct": 0.002},
+    )
+
+    assert resultado["vender"] is False
+    assert resultado["motivo"] == "prejuizo_liquido_bloqueado"
 
 
 def test_estado_limita_notional_operacional(monkeypatch):
@@ -2566,3 +2570,263 @@ async def test_auto_trader_reutiliza_sinal_final_do_scanner_multiativo(monkeypat
     assert ger.ordens[0]["side"] == "BUY"
     assert trader._state[token]["ultimo_sinal"] == "BUY"
     assert trader._state[token]["ultimo_motivo"] == "scanner_confirmou_buy"
+
+
+def test_perda_diaria_reseta_no_virar_do_dia():
+    # Run multi-dia: a perda diária deve zerar quando o dia operacional muda,
+    # senão vira perda cumulativa e trava o breaker cedo demais.
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 25})
+    state["daily_loss_usdt"] = 7.5
+    state["daily_loss_data"] = "1999-01-01"
+    _resetar_perda_diaria_se_novo_dia(state)
+    assert state["daily_loss_usdt"] == 0.0
+    assert state["daily_loss_data"] == _data_operacional()
+
+
+def test_perda_diaria_preserva_no_mesmo_dia():
+    # No mesmo dia operacional a perda acumulada NÃO pode ser zerada.
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 25})
+    state["daily_loss_usdt"] = 7.5
+    state["daily_loss_data"] = _data_operacional()
+    _resetar_perda_diaria_se_novo_dia(state)
+    assert state["daily_loss_usdt"] == 7.5
+
+
+class _GerenciadorOrdensNaoPreenche(_GerenciadorOrdensFalso):
+    """Simula a Binance devolvendo ordem NÃO preenchida (status EXPIRED, executedQty 0)."""
+
+    async def obter_filtros_simbolo(self, simbolo):
+        return {"min_notional": 0.00001, "min_qty": 0.00001, "step_size": 0.00001}
+
+    async def criar_ordem_market(self, simbolo, lado, quantidade=None, quote_order_qty=None):
+        ordem = {
+            "symbol": simbolo,
+            "side": lado,
+            "quantity": quantidade,
+            "quote_order_qty": quote_order_qty,
+            "orderId": len(self.ordens) + 1,
+            "status": "EXPIRED",
+            "executedQty": "0",
+        }
+        self.ordens.append(ordem)
+        return ordem
+
+
+@pytest.mark.asyncio
+async def test_auto_trader_nao_abre_ciclo_quando_compra_nao_preenche(monkeypatch):
+    # Guarda anti-posição-fantasma (causa-raiz #2 do run 13-18h): ordem BUY que volta
+    # EXPIRED/executedQty=0 NÃO pode abrir ciclo — abriria ciclo_ativo sem ativo real e
+    # travaria o bot em 'limite_trades_abertos'.
+    trader = TraderAutoTestnet()
+    token = "buy_nao_preenche"
+    trader._state[token] = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 20})
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _klines(*args, **kwargs):
+        return [{"ts": 1, "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 100}]
+
+    async def _livro(*args, **kwargs):
+        return {"bid_price": 10.4, "ask_price": 10.6, "bid_qty": 1.0, "ask_qty": 1.0}
+
+    async def _ajustes(*args, **kwargs):
+        return {"aplicado": {}}
+
+    async def _preparar_execucao(self, aprovacao_risco, preco_referencia):
+        return {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "BUY",
+            "modo": "testnet",
+            "fracao_capital": 0.02,
+            "notional_sugerido": 20.0,
+            "gatilho_offset_pct": 0.0,
+            "janela_decisao": {},
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "lucro_liquido_esperado_pct": 0.02,
+            "simulacao_ordem": {
+                "quantidade": 0.0004,
+                "preco_referencia": 50000.0,
+                "notional_estimado": 20.0,
+            },
+        }
+
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.coletar_e_persistir", _noop)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioOhlcv.obter_ultimas", _klines)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioLivroTopo.obter_ultimo", _livro)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_noticias_para_peso", lambda simbolo="BTCUSDT": _ajustes())
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_sinal", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_risco", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
+        lambda **kwargs: {
+            "simbolo": "BTCUSDT",
+            "acao": "BUY",
+            "ts": 1,
+            "confianca": 0.92,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.02,
+            "features": {"close": 50000.0},
+            "motivo": "compra_orquestrada",
+        },
+    )
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
+        lambda **kwargs: {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "BUY",
+            "aprovado": True,
+            "motivos": [],
+            "fracao_capital": 0.02,
+            "notional_sugerido": 20.0,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.02,
+            "lucro_liquido_esperado_usdt": 0.4,
+            "ev_liquido_usdt": 20.0,
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "janela_decisao": {"executar_apos_ts": 0},
+            "paper_trading": False,
+            "risk_config_aplicado": {},
+        },
+    )
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.ExecutorIsoladoUsuario.preparar_execucao", _preparar_execucao)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioAuditoria.registrar", _noop)
+
+    ger = _GerenciadorOrdensNaoPreenche()
+    await trader._executar_ciclo(
+        token=token,
+        sessao={"modo_testnet": True},
+        cliente_conta=_ClienteContaFalso(saldo_usdt=100.0, saldo_base=0.0),
+        cliente_mercado=_ClienteMercadoFalso(),
+        ger=ger,
+    )
+
+    assert len(ger.ordens) == 1                                    # tentou a compra
+    assert ger.ordens[0]["side"] == "BUY"
+    assert trader._state[token]["ciclo_ativo"] is False            # mas NÃO abriu ciclo-fantasma
+    assert trader._state[token]["ultima_acao"] == "HOLD"
+    assert trader._state[token]["ultimo_motivo"] == "ordem_compra_nao_preenchida"
+
+
+@pytest.mark.asyncio
+async def test_auto_trader_nao_encerra_ciclo_quando_venda_nao_preenche(monkeypatch):
+    # Guarda anti-fantasma na saída: venda que NÃO preenche não pode encerrar o ciclo —
+    # encerrar registraria lucro inexistente e o bot acharia estar zerado segurando o ativo.
+    trader = TraderAutoTestnet()
+    token = "sell_nao_preenche"
+    trader._state[token] = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 25})
+    trader._state[token].update(
+        {
+            "sequencia_ciclo": 1,
+            "ciclo_id": 1,
+            "ciclo_ativo": True,
+            "estado_ciclo": "EM_POSICAO",
+            "ciclo_origem": "auto",
+            "ciclo_iniciado_ts": 1,
+            "ciclo_quantidade": 0.001,
+            "ciclo_preco_entrada": 50000.0,
+            "ciclo_notional_entrada": 50.0,
+        }
+    )
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _klines(*args, **kwargs):
+        return [{"ts": 1, "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 100}]
+
+    async def _livro(*args, **kwargs):
+        return {"bid_price": 10.4, "ask_price": 10.6, "bid_qty": 1.0, "ask_qty": 1.0}
+
+    async def _ajustes(*args, **kwargs):
+        return {"aplicado": {}}
+
+    async def _preparar_execucao(self, aprovacao_risco, preco_referencia):
+        return {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "SELL",
+            "modo": "testnet",
+            "fracao_capital": 0.02,
+            "notional_sugerido": 50.0,
+            "gatilho_offset_pct": 0.0,
+            "janela_decisao": {},
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "lucro_liquido_esperado_pct": 0.03,
+            "simulacao_ordem": {
+                "quantidade": 0.001,
+                "preco_referencia": 50000.0,
+                "notional_estimado": 50.0,
+            },
+        }
+
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.coletar_e_persistir", _noop)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioOhlcv.obter_ultimas", _klines)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioLivroTopo.obter_ultimo", _livro)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_noticias_para_peso", lambda simbolo="BTCUSDT": _ajustes())
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_sinal", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_risco", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
+        lambda **kwargs: {
+            "simbolo": "BTCUSDT",
+            "acao": "SELL",
+            "ts": 1,
+            "confianca": 0.95,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.03,
+            "features": {"close": 50500.0, "spread_rel": 0.0},
+            "motivo": "saida_otimizada",
+        },
+    )
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
+        lambda **kwargs: {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "SELL",
+            "aprovado": False,
+            "motivos": ["cooldown_ativo"],
+            "fracao_capital": 0.0,
+            "notional_sugerido": 0.0,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.03,
+            "lucro_liquido_esperado_pct": 0.03,
+            "lucro_liquido_esperado_usdt": 0.0,
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "janela_decisao": {"executar_apos_ts": 0},
+            "paper_trading": False,
+            "risk_config_aplicado": {},
+        },
+    )
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.ExecutorIsoladoUsuario.preparar_execucao", _preparar_execucao)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioAuditoria.registrar", _noop)
+
+    ger = _GerenciadorOrdensNaoPreenche()
+    await trader._executar_ciclo(
+        token=token,
+        sessao={"modo_testnet": True},
+        cliente_conta=_ClienteContaFalso(saldo_usdt=0.0, saldo_base=0.001),
+        cliente_mercado=_ClienteMercadoFalso(precos={"BTCUSDT": 50500.0}),
+        ger=ger,
+    )
+
+    assert len(ger.ordens) == 1                                    # tentou a venda
+    assert ger.ordens[0]["side"] == "SELL"
+    assert trader._state[token]["ciclo_ativo"] is True             # ciclo PRESERVADO (não vendeu de verdade)
+    assert trader._state[token]["ultimo_motivo"] == "ordem_venda_nao_preenchida"

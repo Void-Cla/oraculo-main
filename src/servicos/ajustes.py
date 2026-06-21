@@ -222,7 +222,12 @@ async def salvar_ajustes_testnet(
     filtrado = {k: v for k, v in dados.items() if k in _TESTNET_CHAVES}
     if repo and usuario_id:
         await repo.salvar_config(usuario_id, "ajustes_testnet", filtrado)
-    return await obter_ajustes_testnet(repo, usuario_id)
+    atual = await obter_ajustes_testnet(repo, usuario_id)
+    # BUG-04: sem repo/usuario_id o valor enviado (ex.: notional_usdt) era descartado em silêncio
+    # e o retorno caía no padrão. O 'aplicado' precisa refletir o que o usuário enviou —
+    # é exatamente esse dicionário que é repassado ao auto-trader nos endpoints.
+    atual["aplicado"] = _mesclar(atual["aplicado"], filtrado, _TESTNET_CHAVES)
+    return atual
 
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────
