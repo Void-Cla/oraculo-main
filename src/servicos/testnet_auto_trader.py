@@ -15,6 +15,7 @@ from src.modelagem.treinador_online import ajustar_online
 from src.multiativo.config import ativo_cotacao, pares_monitorados, par_usdt_do_ativo, validar_par_monitorado
 from src.multiativo.fee_optimizer import aplicar_taxa_efetiva, montar_perfil_taxas
 from src.multiativo.orquestrador import montar_monitoramento_multiativo
+from src.observabilidade.alertas import disparar_alerta_background
 from src.observabilidade.logger import get_logger
 from src.persistencia.repositorio_auditoria import RepositorioAuditoria
 from src.persistencia.repositorio_config import RepositorioConfig
@@ -278,11 +279,18 @@ def _selecionar_perfil_entrada(
     perfis: list[dict[str, Any]],
     min_notional_usdt: float,
     saldo_quote_livre_usdt: float,
+    modo_exploracao: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     if str(sinal.acao or "HOLD").upper() != "BUY":
         return (None, "acao_atual_nao_usa_perfil_de_entrada")
 
     candidatos: list[dict[str, Any]] = []
+    # FIX FLUXO LÓGICO: em exploração, perfis que passam só nos pré-requisitos físicos
+    # (capital >= min_notional + habilitado) viram FALLBACK quando NENHUM perfil passa nos
+    # filtros de lucro/confirmação. Assim "sem posição aberta" deixa de ficar travado em
+    # `nenhum_perfil_encontrou_lucro_liquido_viavel` (maior bloqueador do run de 13h), mas a
+    # SELEÇÃO normal (quando há perfil qualificado) permanece idêntica — sem mudar o sizing.
+    fallback_exploracao: list[dict[str, Any]] = []
     for perfil in perfis:
         capital_util = min(max(0.0, float(perfil.get("capital_usdt", 0.0) or 0.0)), max(0.0, float(saldo_quote_livre_usdt or 0.0)))
         if capital_util < max(min_notional_usdt, 1e-9):
@@ -291,32 +299,50 @@ def _selecionar_perfil_entrada(
             continue
         confirmacao = _avaliar_confirmacao_composta(sinal=sinal, perfil=perfil)
         lucro_esperado_usdt = capital_util * max(0.0, float(sinal.lucro_liquido_esperado_pct or 0.0))
+        prioridade = {"mini": 1, "ganancioso": 2, "diario": 3}.get(str(perfil.get("id") or "").lower(), 0)
+        score = lucro_esperado_usdt + (float(sinal.confianca or 0.0) * 0.05) + (float(confirmacao["pontuacao"]) * 0.01)
+        registro = {
+            **perfil,
+            "capital_usdt_util": capital_util,
+            "lucro_esperado_usdt": lucro_esperado_usdt,
+            "confirmacao_composta": confirmacao,
+            "_prioridade": prioridade,
+            "_score": score,
+        }
+        if modo_exploracao:
+            fallback_exploracao.append(registro)
         if lucro_esperado_usdt + 1e-9 < float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0):
             continue
         if not confirmacao["confirmado"]:
             continue
-        prioridade = {"mini": 1, "ganancioso": 2, "diario": 3}.get(str(perfil.get("id") or "").lower(), 0)
-        score = lucro_esperado_usdt + (float(sinal.confianca or 0.0) * 0.05) + (float(confirmacao["pontuacao"]) * 0.01)
-        candidatos.append(
-            {
-                **perfil,
-                "capital_usdt_util": capital_util,
-                "lucro_esperado_usdt": lucro_esperado_usdt,
-                "confirmacao_composta": confirmacao,
-                "_prioridade": prioridade,
-                "_score": score,
-            }
-        )
+        candidatos.append(registro)
 
-    if not candidatos:
+    pool = candidatos
+    motivo_ok = "perfil_selecionado"
+    if not pool and modo_exploracao and fallback_exploracao:
+        # Nenhum perfil qualificou nos filtros, mas há capital viável → exploração usa o fallback
+        # (o gate REAL de entrada vira o edge lógico + veto Gemini, logo adiante).
+        pool = fallback_exploracao
+        motivo_ok = "perfil_selecionado_exploracao_fallback"
+    if not pool:
         return (None, "nenhum_perfil_encontrou_lucro_liquido_viavel")
-    melhor = max(candidatos, key=lambda item: (float(item["_prioridade"]), float(item["_score"])))
+    # Micro-trading: preferir perfil de MENOR alvo líquido e menor tempo em posição
+    # (ex.: "mini" $0.01 / 0s) em vez de "diario"/"ganancioso" ($0.15–$0.50 / 45–300s).
+    # Antes, max(prioridade) escolhia o perfil mais ganancioso e esticava cada ciclo.
+    melhor = min(
+        pool,
+        key=lambda item: (
+            float(item.get("lucro_minimo_usdt", 999.0) or 999.0),
+            int(item.get("tempo_minimo_posicao_segundos", 999) or 999),
+            -float(item["_score"]),
+        ),
+    )
     melhor = {chave: valor for chave, valor in melhor.items() if not str(chave).startswith("_")}
     state["perfis_capital"] = [
         melhor if str(perfil.get("id") or "") == str(melhor.get("id") or "") else perfil
         for perfil in perfis
     ]
-    return (melhor, "perfil_selecionado")
+    return (melhor, motivo_ok)
 
 
 def _tem_posicao_ativa(
@@ -333,15 +359,6 @@ def _novo_id_ciclo(state: dict[str, Any]) -> int:
     proximo = int(state.get("sequencia_ciclo", 0) or 0) + 1
     state["sequencia_ciclo"] = proximo
     return proximo
-
-
-def _preco_compra_referencia(trades: list[dict[str, Any]], preco_padrao: float) -> float:
-    compras = [item for item in trades if bool(item.get("isBuyer"))]
-    ultima_compra = max(compras, key=lambda item: int(item.get("time", 0) or 0), default=None)
-    try:
-        return float((ultima_compra or {}).get("price", preco_padrao) or preco_padrao)
-    except (TypeError, ValueError):
-        return float(preco_padrao or 0.0)
 
 
 def _resumir_extrato_par(trades: list[dict[str, Any]], preco_padrao_par: float) -> dict[str, Any]:
@@ -703,6 +720,13 @@ def _aplicar_modo_exploracao(
     ajustes_sinal["signal_min_prob"] = 0.0
     ajustes_sinal["auto_lucro_liquido_minimo_usdt"] = 0.0
     ajustes_sinal["modo_exploracao"] = True  # zera o piso de saída em _limites_lucro_ciclo
+    # Confirmação multi-timeframe relaxada (decisão do dono, 2026-07-12): em LOW_VOL o padrão
+    # de produção (3 de 4 janelas ≥0.15%) mantinha o bot em HOLD por horas mesmo em exploração,
+    # contrariando o propósito do modo (volume de ciclos p/ validação). Aqui basta 1 janela
+    # com ≥0.08%. TESTNET-ONLY por construção (esta função recusa engatar fora de testnet);
+    # produção/conta real seguem exigindo 3 janelas ≥0.15% — gate de qualidade intocado lá.
+    ajustes_sinal["signal_confirm_threshold"] = 1
+    ajustes_sinal["signal_janela_limiar_pct"] = 0.0008
     LOG.warning(
         "modo_exploracao_ativo",
         extra={"aviso": "micro-trading 1-15m OPERANDO com EV potencialmente NEGATIVO (testnet)"},
@@ -890,7 +914,9 @@ def _limites_lucro_ciclo(
     # Modo exploração (testnet) zera o piso de saída p/ o micro-trading 1-15m ciclar de fato
     # (sai em qualquer lucro/stop); fora dele, hard floor de $0.01. Ver _aplicar_modo_exploracao.
     if bool(ajustes_sinal.get("modo_exploracao")):
-        minimo_usdt_cfg = max(0.0, float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0))
+        # Exploração relaxa filtros de entrada, mas nunca transforma lucro bruto em
+        # lucro líquido: a saída precisa deixar pelo menos US$ 0,01 após custos.
+        minimo_usdt_cfg = max(0.01, float(perfil.get("lucro_minimo_usdt", 0.0) or 0.0))
     else:
         minimo_usdt_cfg = max(
             0.01,
@@ -953,7 +979,9 @@ def _avaliar_saida_ciclo(
     # prejuízo"). Segurar um perdedor indefinidamente é o comportamento perigoso — só é
     # mantido se AUTO_SEGURAR_NO_PREJUIZO=true (opt-in explícito, desaconselhado).
     segurar_no_prejuizo = os.getenv("AUTO_SEGURAR_NO_PREJUIZO", "false").lower() == "true"
-    if float(state.get("ciclo_retorno_aberto_pct", 0.0) or 0.0) <= -stop_protecao_pct:
+    retorno_bruto_aberto_pct = float(state.get("ciclo_retorno_aberto_pct", 0.0) or 0.0)
+    retorno_liquido_aberto_pct = float(state.get("ciclo_retorno_liquido_aberto_pct", 0.0) or 0.0)
+    if retorno_bruto_aberto_pct < 0.0 and retorno_liquido_aberto_pct <= -stop_protecao_pct:
         if segurar_no_prejuizo:
             return {
                 "vender": False,
@@ -1486,6 +1514,75 @@ class TestnetAutoTrader:
             )
             return ResultadoGateEdge(False, "erro_no_gate_fail_closed", {"erro": str(exc)})
 
+    def definir_filtro_ia(self, filtro: Any) -> None:
+        """Injeta o filtro agêntico de pré-execução (opt-in). `None` desativa (default)."""
+        self._ai_filter = filtro
+
+    def definir_analista_ia(self, analista: Any) -> None:
+        """Injeta o analista de voto direcional de peso igual (opt-in). `None` desativa (default).
+
+        Camada DISTINTA do `_ai_filter` (veto puro, pós-gates) — este analista opina
+        BUY/SELL/HOLD dentro do consenso ponderado, ANTES dos gates financeiros (ver
+        `src/sinais/consenso.py`, comentário de topo). Ambas coexistem e são independentes.
+        """
+        self._analista_ia = analista
+
+    def _avaliar_edge_logico_entrada(self, *, sinal: Any, ajustes_risco: dict[str, Any]) -> Any:
+        """Avalia o EDGE LÓGICO de entrada (movimento líquido esperado vs custo round-trip).
+
+        Custo derivado das taxas/slippage configurados (fonte única EVCalculator). Em exploração,
+        a margem é frouxa (break-even); em conta real, exige folga. NUNCA lança (fail-safe → NEGA)."""
+        from src.risco.edge_logico import ResultadoEdgeLogico, avaliar_edge_logico
+
+        try:
+            taxa_taker_pct = float(ajustes_risco.get("binance_taxa_taker_pct", 0.1) or 0.1)
+            slippage = float(ajustes_risco.get("slippage_pct", 0.0005) or 0.0005)
+            return avaliar_edge_logico(
+                retorno_liquido_esperado_pct=float(getattr(sinal, "lucro_liquido_esperado_pct", 0.0) or 0.0),
+                confianca=float(getattr(sinal, "confianca", 0.0) or 0.0),
+                fee=taxa_taker_pct / 100.0,   # % → fração
+                slippage=slippage,
+                modo_exploracao=bool(ajustes_risco.get("permitir_ev_negativo", False)),
+            )
+        except Exception as exc:  # fail-safe: erro no gate ⇒ NÃO entra
+            LOG.error("falha_edge_logico", extra={"erro": str(exc)})
+            return ResultadoEdgeLogico(
+                aprovado=False, motivo="erro_no_edge_logico", retorno_liquido_esperado_pct=0.0,
+                custo_round_trip_pct=0.0, bruto_esperado_pct=0.0, margem_minima_pct=0.0,
+                confianca=0.0, confianca_minima=0.0,
+            )
+
+    async def _consultar_filtro_ia(self, *, simbolo: str, sinal: Any, saldo: float) -> dict[str, Any] | None:
+        """Consulta o filtro agêntico (se injetado). Retorna o dict do VETO se a IA vetou,
+        ou None se prosseguir (incluindo quando não há filtro). FAIL-OPEN: qualquer erro ⇒ None
+        (o bot mecânico segue). A IA NUNCA aprova nem dimensiona — só pode vetar a abertura."""
+        filtro = getattr(self, "_ai_filter", None)
+        if filtro is None:
+            return None
+        try:
+            sinal_dict = sinal.to_dict() if hasattr(sinal, "to_dict") else dict(sinal)
+            decisao = await filtro.avaliar(simbolo=simbolo, sinal=sinal_dict, saldo=float(saldo or 0.0))
+            if not getattr(decisao, "vetou", False):
+                return None
+            veto = decisao.to_dict()
+            # Persiste o veto para análise de eficácia (/v1/ai/vetos) — best-effort.
+            try:
+                from src.persistencia.repositorio_auditoria import RepositorioAuditoria
+
+                await RepositorioAuditoria.registrar_enriquecido(
+                    evento="vetado_por_ia",
+                    componente="ai_pre_execution_filter",
+                    motivo=str(veto.get("rationale", ""))[:300],
+                    simbolo=simbolo,
+                    meta=veto,
+                )
+            except Exception as exc_audit:
+                LOG.warning("falha_persistir_veto_ia", extra={"simbolo": simbolo, "erro": str(exc_audit)})
+            return veto
+        except Exception as exc:  # fail-open: IA jamais derruba/trava o caminho mecânico
+            LOG.warning("falha_filtro_ia_fail_open", extra={"simbolo": simbolo, "erro": str(exc)})
+            return None
+
     async def _persistir_ordem_executada(
         self,
         *,
@@ -1629,6 +1726,15 @@ class TestnetAutoTrader:
                         "circuit_breaker_perda_diaria_acionado",
                         extra={"simbolo": simbolo, "perda_diaria_usdt": perda_diaria, "limite_perda_usdt": limite_perda},
                     )
+                    # G2 (up.md P0): halt financeiro sem alerta = falha silenciosa. Fire-and-forget
+                    # (nunca bloqueia o loop; fail-safe se Telegram/webhook não configurados/fora do ar).
+                    disparar_alerta_background(
+                        chave="halt_perda_diaria",
+                        titulo="HALT: limite de perda diária atingido — reset requer ação humana",
+                        simbolo=simbolo,
+                        perda_diaria_usdt=round(perda_diaria, 4),
+                        limite_perda_usdt=round(limite_perda, 4),
+                    )
         except Exception as exc:
             LOG.warning("falha_atualizar_perda_diaria", extra={"simbolo": simbolo, "erro": str(exc)})
 
@@ -1667,7 +1773,8 @@ class TestnetAutoTrader:
         ajustes_risco["lucro_liquido_minimo_usdt"] = params_adaptativos["lucro_liquido_minimo_usdt"]
         ajustes_risco["lucro_liquido_minimo"] = params_adaptativos["lucro_liquido_minimo_pct"]
         ajustes_risco["filtro_ev_minimo_usdt"] = params_adaptativos["filtro_ev_minimo_usdt"]
-        ajustes_risco["cooldown_minutos"] = max(1, params_adaptativos["cooldown_seg"] // 60)
+        # Cooldown sub-minuto do controlador adaptativo (15–45s) — não truncar p/ ≥1 min.
+        ajustes_risco["cooldown_segundos"] = max(15, int(params_adaptativos["cooldown_seg"]))
         ajustes_risco["max_trades_por_hora"] = 40
         ajustes_risco["max_trades_abertos"] = 5
         ajustes_risco["binance_taxa_maker_pct"] = params_adaptativos["binance_taxa_maker_pct"]
@@ -1701,6 +1808,11 @@ class TestnetAutoTrader:
             ajustes_sinal=ajustes_sinal_base,
             capital_planejado_usdt=notional_teto,
             lucro_liquido_minimo_usdt=lucro_liquido_minimo_usdt,
+            # Mesma instância de `AnalistaMercadoIA` do foco por-símbolo abaixo (ver
+            # `definir_analista_ia`) — permite ao scanner multiativo primar o cache de LOTE
+            # (1 chamada de rede p/ todos os símbolos) em vez de deixar o `analista_ia=None`
+            # implícito de antes, que forçava cada consumidor a chamar a rede por conta própria.
+            analista_ia=getattr(self, "_analista_ia", None),
         )
         perfil_taxas = dict(monitoramento_multiativo.get("perfil_taxas") or {})
         ajustes_sinal = _ajustes_sinal_com_taxa_efetiva(ajustes_sinal_base, perfil_taxas)
@@ -1905,14 +2017,20 @@ class TestnetAutoTrader:
 
             noticias_cache = await obter_noticias_para_peso(simbolo=par_usdt_do_ativo(base_asset))
             noticias = list(noticias_cache.get("itens", []))
+            # `gerar_sinal_orquestrado` é async desde 2026-07-01 (voto direcional de peso
+            # igual da IA). `analista_ia` reusa a MESMA instância de `ProvedorIA` (gemini|gpt|
+            # claude, conforme AI_PROVIDER) injetada via `definir_analista_ia` (ver lifespan em
+            # main.py) — não cria cliente HTTP duplicado. `None` (provedor sem chave) preserva
+            # o comportamento pré-existente.
             sinal = SignalDecision.from_mapping(
-                gerar_sinal_orquestrado(
+                await gerar_sinal_orquestrado(
                     simbolo=simbolo,
                     klines=klines,
                     livro_topo=livro_topo,
                     noticias=noticias,
                     saldo=saldo_contexto,
                     ajustes_sinal=ajustes_sinal,
+                    analista_ia=getattr(self, "_analista_ia", None),
                 )
             )
         state["ultimo_sinal"] = sinal.acao
@@ -1944,7 +2062,7 @@ class TestnetAutoTrader:
         else:
             aprovacao = RiskApproval.from_mapping(
                 avaliar_sinal_para_usuario(
-                    usuario=_usuario_virtual(ajustes_risco, modo_testnet=modo_testnet),
+                    usuario=_usuario_virtual(ajustes_risco, modo_testnet=modo_testnet, notional_usdt=notional_teto),
                     sinal=sinal.to_dict(),
                     saldo=saldo_contexto,
                     estado_execucao=estado_execucao,
@@ -1959,6 +2077,7 @@ class TestnetAutoTrader:
                 perfis=perfis_capital,
                 min_notional_usdt=min_notional_usdt,
                 saldo_quote_livre_usdt=saldo_quote_livre_usdt,
+                modo_exploracao=bool(ajustes_sinal.get("modo_exploracao")),
             )
 
         if perfil_operacao is not None:
@@ -2140,7 +2259,29 @@ class TestnetAutoTrader:
                 return
             confirmacao_entrada = dict(perfil_operacao.get("confirmacao_composta") or _avaliar_confirmacao_composta(sinal=sinal, perfil=perfil_operacao))
             state["ultima_confirmacao_composta"] = confirmacao_entrada
-            if not bool(confirmacao_entrada.get("confirmado")):
+            modo_exploracao_entrada = bool(ajustes_sinal.get("modo_exploracao"))
+            if modo_exploracao_entrada:
+                # EDGE LÓGICO é o gate de entrada em exploração (substitui a confirmação composta):
+                # só entra se o movimento LÍQUIDO esperado cobrir o custo round-trip + margem e a
+                # confiança for suficiente. Trabalha junto com o veto do Gemini (logo adiante).
+                edge_log = self._avaliar_edge_logico_entrada(sinal=sinal, ajustes_risco=ajustes_risco)
+                state["ultimo_edge_logico"] = edge_log.to_dict()
+                if not edge_log.aprovado:
+                    state["ultima_acao"] = "HOLD"
+                    state["ultimo_motivo"] = f"edge_logico_insuficiente:{edge_log.motivo}"
+                    await self._registrar_evento(
+                        simbolo=simbolo,
+                        state=state,
+                        payload={
+                            "resultado": "sem_execucao",
+                            "motivo": state["ultimo_motivo"],
+                            "sinal": sinal.to_dict(),
+                            "edge_logico": edge_log.to_dict(),
+                        },
+                    )
+                    _espelhar_estado_corrente()
+                    return
+            elif not bool(confirmacao_entrada.get("confirmado")):
                 state["ultima_acao"] = "AGUARDANDO"
                 state["ultimo_motivo"] = "entrada_sem_confirmacao_composta"
                 await self._registrar_evento(
@@ -2260,7 +2401,9 @@ class TestnetAutoTrader:
             return
 
         plano = ExecutionPlan.from_mapping(
-            await ExecutorIsoladoUsuario(_usuario_virtual(ajustes_risco, modo_testnet=modo_testnet)).preparar_execucao(
+            await ExecutorIsoladoUsuario(
+                _usuario_virtual(ajustes_risco, modo_testnet=modo_testnet, notional_usdt=notional_teto)
+            ).preparar_execucao(
                 aprovacao.to_dict(),
                 preco_referencia=float(sinal.features.get("close", preco_atual_par) or preco_atual_par),
             )
@@ -2288,10 +2431,31 @@ class TestnetAutoTrader:
                     )
                     _espelhar_estado_corrente()
                     return
+            # FILTRO AGÊNTICO (cérebro consultivo) — só pode VETAR a ABERTURA; fail-open.
+            # Timeout/erro/desligado ⇒ PROCEED (o músculo mecânico segue). NUNCA aprova nem
+            # dimensiona; é uma camada ADICIONAL, jamais override de gate financeiro.
+            veto_ia = await self._consultar_filtro_ia(simbolo=simbolo, sinal=sinal, saldo=saldo_total)
+            if veto_ia is not None:
+                state["ultima_acao"] = "HOLD"
+                state["ultimo_motivo"] = f"vetado_por_ia:{veto_ia.get('pattern', 'none')}"
+                await self._registrar_evento(
+                    simbolo=simbolo,
+                    state=state,
+                    payload={"resultado": "sem_execucao", "motivo": state["ultimo_motivo"], "ia": veto_ia},
+                )
+                _espelhar_estado_corrente()
+                return
+            # O tamanho da compra respeita 3 tetos: o sugerido pelo risk_engine, o saldo livre,
+            # e o NOTIONAL escolhido pelo cliente no front (notional_teto = % da carteira, DA-31).
+            # Este último garante que a % do slider seja um TETO REAL — o risk_engine solta os
+            # freios em testnet (para o tamanho refletir a % do cliente), mas nunca ultrapassa
+            # o que o cliente pediu. notional_teto<=0 (sem config) = sem esse teto.
             notional_compra_usdt = min(
                 max(0.0, float(aprovacao.notional_sugerido or 0.0)),
                 max(0.0, saldo_quote_livre_usdt),
             )
+            if notional_teto > 0.0:
+                notional_compra_usdt = min(notional_compra_usdt, notional_teto)
             if quote_asset == "USDT" and notional_compra_usdt < max(min_notional, 1e-9):
                 # Log detailed balance info to aid debugging when bot reports
                 # 'saldo_quote_insuficiente_para_compra' despite apparent large account balance.
@@ -2605,7 +2769,20 @@ class TestnetAutoTrader:
                     limit = int(state.get("consecutive_errors_limit", 5) or 5)
                     if int(state.get("consecutive_errors", 0)) >= limit:
                         state["circuit_tripped"] = True
+                        await RepositorioConfig.definir("retomada_operacoes_bloqueadas", True)
+                        await RepositorioConfig.definir("retomada_modo", "pausado")
+                        await RepositorioConfig.definir(
+                            "bloqueio_operacional_motivo", "limite_erros_consecutivos_atingido"
+                        )
                         await self._registrar_evento(simbolo=str(state.get("simbolo") or ""), state=state, payload={"motivo": "consecutive_errors_limit_reached"})
+                        # G2 (up.md P0): mesmo motivo do halt de perda diária — nunca falhar em silêncio.
+                        disparar_alerta_background(
+                            chave="halt_erros_consecutivos",
+                            titulo="HALT: limite de erros consecutivos atingido — reset requer ação humana",
+                            simbolo=str(state.get("simbolo") or ""),
+                            erros_consecutivos=int(state.get("consecutive_errors", 0)),
+                            ultimo_erro=str(state.get("ultimo_erro") or ""),
+                        )
                 state["ultimo_ts"] = int(time.time() * 1000)
                 await asyncio.sleep(max(5, int(state.get("intervalo_segundos", 30) or 30)))
         except asyncio.CancelledError:

@@ -2,6 +2,8 @@
 set -e
 cd "$(dirname "$0")"
 
+export DB_PATH="$(pwd)/dados/oraculo.sqlite"
+
 if [ ! -f ".venv/bin/activate" ]; then
   echo "[INFO] Criando venv..."
   python3 -m venv .venv
@@ -11,6 +13,7 @@ source .venv/bin/activate
 pip install -r requirements.txt -q
 
 echo "[INFO] Inicializando banco de dados..."
+echo "[INFO] Banco operacional: $DB_PATH"
 python -c "from src.persistencia.conexao import inicializar_db; inicializar_db(); print('[OK] DB pronto')"
 
 echo "[INFO] Iniciando Oraculo Auto-Trading em http://0.0.0.0:8000"

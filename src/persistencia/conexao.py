@@ -6,6 +6,7 @@ Este módulo garante o schema evolutivo, aplica pragmas de desempenho
 e expõe um contexto assíncrono `get_conexao()` para uso por repositórios.
 """
 
+import re
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -187,13 +188,33 @@ async def _aplicar_pragmas_async(conn: aiosqlite.Connection) -> None:
     await conn.execute("PRAGMA busy_timeout=5000;")
 
 
+# Whitelist de tabelas que aceitam DDL dinâmica (PRAGMA/ALTER por f-string). SQLite não
+# parametriza identificadores, então a única defesa contra SQL injection é a whitelist:
+# nenhum nome de tabela fora deste conjunto pode chegar à interpolação. (CRIT-SEC-07)
+_TABELAS_DDL_PERMITIDAS: frozenset[str] = frozenset(
+    {"usuarios", "audit", "ordens", "outcomes", "predictions", "features_1m"}
+)
+# Regex defensiva extra: identificador SQL seguro (sem aspas, espaços, ';' etc.).
+_IDENTIFICADOR_SEGURO = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validar_identificador_tabela(tabela: str) -> str:
+    if tabela not in _TABELAS_DDL_PERMITIDAS or not _IDENTIFICADOR_SEGURO.fullmatch(tabela):
+        raise ValueError(f"tabela_nao_permitida_para_ddl_dinamica:{tabela}")
+    return tabela
+
+
 def _colunas_tabela(conn: sqlite3.Connection, tabela: str) -> set[str]:
+    tabela = _validar_identificador_tabela(tabela)
     cursor = conn.execute(f"PRAGMA table_info({tabela})")
     return {str(linha[1]) for linha in cursor.fetchall()}
 
 
 def _garantir_coluna(conn: sqlite3.Connection, tabela: str, coluna_sql: str) -> None:
+    tabela = _validar_identificador_tabela(tabela)
     nome_coluna = coluna_sql.split()[0]
+    if not _IDENTIFICADOR_SEGURO.fullmatch(nome_coluna):
+        raise ValueError(f"coluna_invalida_para_ddl:{nome_coluna}")
     if nome_coluna in _colunas_tabela(conn, tabela):
         return
     conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna_sql}")

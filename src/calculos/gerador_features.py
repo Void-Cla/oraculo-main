@@ -44,9 +44,11 @@ def _normalizar_klines(klines: list[Any]) -> pd.DataFrame:
 
 
 def _retorno(serie: pd.Series, passos: int) -> float:
+    # Dados insuficientes p/ este horizonte — NÃO degradar silenciosamente p/ uma janela
+    # menor (ex.: r_15m calculado com 5 barras). Isso contaminaria o dataset: o modelo
+    # aprenderia "r_15m" misturando horizontes de fato distintos sob o mesmo rótulo.
+    # 0.0 é mais honesto que um valor aproximado de janela errada.
     if len(serie) <= passos:
-        passos = max(1, len(serie) - 1)
-    if passos <= 0:
         return 0.0
     atual = float(serie.iloc[-1])
     anterior = float(serie.iloc[-1 - passos])
@@ -97,7 +99,12 @@ def calcular_features_1m(
 
     ts = int(df["ts"].iloc[-1])
     ultimo_close = float(close.iloc[-1])
-    volume_medio = float(volume.rolling(10, min_periods=1).mean().iloc[-1]) or 1.0
+    # shift(1) exclui a barra CORRENTE da média — incluí-la fazia o próprio valor atual
+    # compor ~10% do denominador, puxando volume_ratio p/ sempre perto de 1.0 e comprimindo
+    # a dispersão útil da feature. Com shift(1), a 1ª barra vira NaN — pd.isna() cobre o
+    # caso de borda (poucos klines) já que `nan or 1.0` não funciona como fallback em Python.
+    media_sem_barra_atual = float(volume.shift(1).rolling(10, min_periods=1).mean().iloc[-1])
+    volume_medio = 1.0 if pd.isna(media_sem_barra_atual) else (media_sem_barra_atual or 1.0)
 
     bid_price = _sanear_numero((livro_topo or {}).get("bid_price"))
     ask_price = _sanear_numero((livro_topo or {}).get("ask_price"))
@@ -108,6 +115,12 @@ def calcular_features_1m(
     book_imb = 0.0
     microprice = ultimo_close
     pressao_rel = 0.0
+    # pressao_compra/venda normalizadas pelo total do book (não quantidade bruta) — a
+    # quantidade bruta depende da granularidade de agregação (depth) e do lot size de cada
+    # símbolo, ficando inconsistente entre símbolos. book_imb já cobre parcialmente o
+    # conceito; aqui mantemos as duas pernas separadas, mas em fração do book (0..1).
+    pressao_compra_norm = 0.0
+    pressao_venda_norm = 0.0
     if bid_price and ask_price:
         mid = (bid_price + ask_price) / 2.0
         spread_rel = ((ask_price - bid_price) / mid) if mid else 0.0
@@ -119,6 +132,8 @@ def calcular_features_1m(
             else ultimo_close
         )
         pressao_rel = book_imb
+        pressao_compra_norm = (bid_qty / total_book) if total_book else 0.0
+        pressao_venda_norm = (ask_qty / total_book) if total_book else 0.0
 
     ret_log = np.log(close.replace(0.0, np.nan)).diff().replace([np.inf, -np.inf], np.nan).fillna(0.0)
     diff_close_micro_rel = ((microprice - ultimo_close) / ultimo_close) if ultimo_close else 0.0
@@ -148,13 +163,16 @@ def calcular_features_1m(
         "book_imb": book_imb,
         "spread_rel": spread_rel,
         "microprice": microprice,
-        "pressao_compra": bid_qty,
-        "pressao_venda": ask_qty,
+        "pressao_compra": pressao_compra_norm,
+        "pressao_venda": pressao_venda_norm,
         "pressao_rel": pressao_rel,
         "ret_log_1m": float(ret_log.iloc[-1]) if not ret_log.empty else 0.0,
         "ret_log_cum_3m": float(ret_log.rolling(3, min_periods=1).sum().iloc[-1]) if not ret_log.empty else 0.0,
         "diff_close_micro_rel": diff_close_micro_rel,
-        "slope_ma": _media_movel(close, 3) - _media_movel(close, 10),
+        # Normalizado pelo preço atual: em unidade absoluta, BTC (~$60k) e um token de
+        # centavos produziriam escalas completamente diferentes p/ o mesmo conceito,
+        # quebrando a premissa de normalização de features entre símbolos.
+        "slope_ma": (_media_movel(close, 3) - _media_movel(close, 10)) / (ultimo_close or 1.0),
         "hora_sin": math.sin(hora_rad),
         "hora_cos": math.cos(hora_rad),
         "dia_sin": math.sin(dia_rad),

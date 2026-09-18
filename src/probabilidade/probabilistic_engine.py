@@ -51,7 +51,15 @@ class ProbabilisticTradeEngine:
         spread = max(float(spread), 0.0)
         ev_buy = self.ev_calc.calculate(prob_up, take_profit, stop_loss, spread)
         ev_sell = self.ev_calc.calculate(prob_down, take_profit, stop_loss, spread)
-        action = self.selector.decide(ev_buy, ev_sell, prob_up, prob_down)
+        # GAP-FLX-01: o custo round-trip do filtro de movimento mínimo vem da FONTE ÚNICA
+        # (EVCalculator, DA-02) — não do default estático do TradeSelector. Assim o filtro
+        # "movimento >= 3x custo" usa o custo REAL (fee+slippage round-trip + spread).
+        self.selector.custo_round_trip_pct = float(self.ev_calc.custos_totais(spread))
+        # GAP-FLX-01: passar take_profit/stop_loss ATIVA o filtro de movimento mínimo no
+        # caminho vivo do sinal (antes o engine chamava decide() sem eles → filtro inerte).
+        action = self.selector.decide(
+            ev_buy, ev_sell, prob_up, prob_down, take_profit=take_profit, stop_loss=stop_loss
+        )
         return {
             "action": action,
             "prob_up": prob_up,

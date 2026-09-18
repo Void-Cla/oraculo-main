@@ -9,6 +9,8 @@ from src.multiativo.config import ativo_base, ativo_cotacao
 from src.multiativo.orquestrador import montar_monitoramento_multiativo
 from src.observabilidade.logger import get_logger
 from src.servicos.dashboard import montar_dashboard
+from src.servicos.contabilidade_painel import resumo_contabil, valorizar_saldos_reais
+from src.servicos.sessoes import comparar_patrimonio_sessao
 from src.servicos.noticias import obter_noticias_para_peso
 from src.tarefas.tarefas_previsao import gerar_previsao_dados_persistidos
 
@@ -383,9 +385,11 @@ async def montar_painel_conta(
     saldo_base = _saldo_ativo(conta_raw, ativo_base(simbolo)) if binance_disponivel else {"livre": 0.0, "travado": 0.0, "total": 0.0}
     saldo_quote = _saldo_ativo(conta_raw, ativo_cotacao(simbolo)) if binance_disponivel else {"livre": 0.0, "travado": 0.0, "total": 0.0}
     saldo_usdt = _saldo_ativo(conta_raw, "USDT") if binance_disponivel else {"livre": 0.0, "travado": 0.0, "total": 0.0}
-    saldo_total_estimado = float((monitoramento_multiativo.get("capital_manager") or {}).get("saldo_total_estimado_usdt", 0.0) or 0.0)
-    if saldo_total_estimado <= 0.0:
-        saldo_total_estimado = saldo_usdt["total"] + (saldo_btc["total"] * preco_atual)
+    patrimonio_marcado = valorizar_saldos_reais(
+        conta_raw, monitoramento_multiativo.get("precos_usdt", {}),
+    )
+    patrimonio = patrimonio_marcado["patrimonio_usdt"] if binance_disponivel else None
+    escopo = tuple(item["ativo"] for item in patrimonio_marcado["ativos"])
     taxas = _taxas_conta(conta_raw) if binance_disponivel else {"maker_pct": 0.0, "taker_pct": 0.0, "compra_pct": 0.0, "venda_pct": 0.0}
 
     operacional = dict(base.get("operacional") or {})
@@ -416,9 +420,11 @@ async def montar_painel_conta(
         "saldo_btc": saldo_btc,
         "saldo_usdt": saldo_usdt,
         "saldos_monitorados": monitoramento_multiativo.get("saldos_monitorados", {}),
-        "saldo_total_estimado_usdt": round(saldo_total_estimado, 8),
+        "patrimonio_marcado": patrimonio_marcado,
+        "saldo_total_estimado_usdt": patrimonio,
         "preco_simbolo": round(preco_atual, 8),
-        "preco_btcusdt": round(float((monitoramento_multiativo.get("precos_usdt") or {}).get("BTC", preco_atual) or preco_atual), 8),
+        "preco_btcusdt": (round(float(monitoramento_multiativo.get("precos_usdt", {}).get("BTC")), 8)
+                          if monitoramento_multiativo.get("precos_usdt", {}).get("BTC") else None),
         "taxas": taxas,
         "taxas_efetivas": monitoramento_multiativo.get("perfil_taxas", {}),
         "erro": erro_binance,
@@ -437,6 +443,21 @@ async def montar_painel_conta(
         ),
     }
 
+    comparacao = await comparar_patrimonio_sessao(
+        sessao.get("token"),
+        patrimonio if binance_disponivel else None,
+        escopo,
+        ativos=patrimonio_marcado["ativos"],
+    )
+    contabilidade = resumo_contabil(
+        negociacoes, trades, disponivel=binance_disponivel,
+        modo_testnet=bool(sessao["modo_testnet"]), simbolo=simbolo,
+    )
+    if not binance_disponivel:
+        for campo in ("pnl_realizado_bruto_usdt", "pnl_realizado_liquido_usdt",
+                      "pnl_nao_realizado_usdt", "pnl_total_liquido_usdt"):
+            pnl[campo] = None
+
     return {
         "simbolo": simbolo,
         "ts_atualizacao": base.get("ts_atualizacao"),
@@ -452,6 +473,8 @@ async def montar_painel_conta(
         "modelos": base.get("modelos"),
         "conta": conta,
         "pnl": pnl,
+        "contabilidade": contabilidade,
+        "comparacao_sessao": comparacao,
         "ordens": ordens,
         "noticias": noticias_cache,
         "multiativos": monitoramento_multiativo,

@@ -140,6 +140,7 @@ async def montar_monitoramento_multiativo(
     ajustes_sinal: dict[str, Any] | None = None,
     capital_planejado_usdt: float | None = None,
     lucro_liquido_minimo_usdt: float | None = None,
+    analista_ia: Any | None = None,
 ) -> dict[str, Any]:
     cliente_local = cliente
     if cliente_local is None:
@@ -203,17 +204,95 @@ async def montar_monitoramento_multiativo(
             "saldo_total": capital_info["saldo_total_estimado_usdt"],
             "saldo_livre": capital_info["saldo_usdt_livre"],
         }
+        noticias_por_simbolo_snapshot = {
+            simbolo: list((noticias_por_simbolo.get(par_usdt_do_ativo(ativo_base(simbolo))) or {}).get("itens", []))
+            for simbolo in snapshots
+        }
+
+        preparar_contexto_diario = getattr(analista_ia, "preparar_contexto_diario", None)
+        if callable(preparar_contexto_diario):
+            await preparar_contexto_diario(
+                simbolos=list(snapshots),
+                saldo=float(saldo_contexto.get("saldo_total", 0.0) or 0.0),
+                noticias_por_simbolo=noticias_por_simbolo_snapshot,
+            )
+
+        # GATE DE MOMENTO CRÍTICO (DA-30, 2026-07-01, pedido do dono): a IA só é consultada nos
+        # símbolos onde o motor MECÂNICO já calculou EV líquido acionável — não em todo ciclo
+        # de todo símbolo. Passo 1: sinal mecânico PURO (analista_ia=None) para TODOS os
+        # símbolos — é o "trabalho bruto" (features/regime/ML/EV), 100% local/CPU, sem rede.
+        # Passo 2: dos símbolos com EV acionável (mesmo critério de `signal_engine`, gate
+        # individual lá é a defesa primária — este filtro aqui só evita o RE-CÁLCULO caro do
+        # passo 3 para quem já não teria chance), UMA chamada de lote cobre todos eles.
+        # Passo 3: só os símbolos elegíveis são recalculados com `analista_ia` (cache do lote
+        # evita nova rede); os demais reaproveitam o sinal puro do passo 1 (idêntico ao que o
+        # gate individual produziria de qualquer forma — `voto_ia` neutro por EV insuficiente).
         for simbolo, snapshot in snapshots.items():
-            simbolo_noticias = par_usdt_do_ativo(ativo_base(simbolo))
-            noticias = list((noticias_por_simbolo.get(simbolo_noticias) or {}).get("itens", []))
-            sinais[simbolo] = gerar_sinal_orquestrado(
+            sinais[simbolo] = await gerar_sinal_orquestrado(
                 simbolo=simbolo,
                 klines=snapshot.get("klines") or [],
                 livro_topo=snapshot.get("livro_topo"),
-                noticias=noticias,
+                noticias=noticias_por_simbolo_snapshot.get(simbolo),
                 saldo=saldo_contexto,
                 ajustes_sinal=ajustes_sinal_exec,
             )
+
+        if analista_ia is not None:
+            signal_min_ev = float(ajustes_sinal_exec.get("signal_min_ev", 0.0001) or 0.0001)
+            simbolos_elegiveis = [
+                simbolo
+                for simbolo, sinal in sinais.items()
+                if max(
+                    float((sinal.get("probabilidade_trade") or {}).get("ev_buy", 0.0) or 0.0),
+                    float((sinal.get("probabilidade_trade") or {}).get("ev_sell", 0.0) or 0.0),
+                )
+                > signal_min_ev
+            ]
+            if simbolos_elegiveis:
+                # `avaliar_lote` é FAIL-SAFE por design (nunca lança — timeout/erro/429/JSON
+                # inválido viram voto neutro por símbolo, não exceção). Por isso um `except`
+                # aqui NUNCA pegaria uma falha real de rede — o bug ficou latente até produção
+                # mostrar log.txt: 429 no lote (fail-safe, sem exceção) seguido de 6 tentativas
+                # INDIVIDUAIS no passo 3 abaixo (cache frio, porque o lote não populou nada em
+                # caso de falha) — 1 falha virou 6 chamadas extras, o OPOSTO do que o gate
+                # deveria fazer. Fix: inspecionar o RESULTADO do lote (fonte "gemini" = sucesso
+                # real; qualquer outra fonte — erro/timeout/indisponivel — = falha) e, se
+                # nenhum símbolo teve sucesso real, ESVAZIAR `simbolos_elegiveis` para que o
+                # passo 3 não rode CHAMADA NENHUMA neste ciclo (decisão do dono: lote falhou ⇒
+                # ciclo fica sem IA, nunca tenta individual — no máximo 1 chamada de rede/ciclo,
+                # sempre, mesmo sob rate limit).
+                try:
+                    votos_lote = await analista_ia.avaliar_lote(
+                        simbolos=simbolos_elegiveis,
+                        saldo=float(saldo_contexto.get("saldo_total", 0.0) or 0.0),
+                        noticias_por_simbolo={s: noticias_por_simbolo_snapshot.get(s) for s in simbolos_elegiveis},
+                    )
+                except Exception as exc:  # defesa extra: mesmo não devendo lançar, nunca travar o ciclo
+                    LOG.warning("falha_analista_ia_lote_fail_safe", extra={"erro": str(exc)})
+                    votos_lote = {}
+
+                # "gemini" = voto real (sucesso). "throttle" = dentro do intervalo de IA, veio
+                # do cache/neutro sem rede — tratar como NÃO-sucesso para o passo 3 não disparar
+                # chamadas individuais. Os demais (erro/timeout/indisponivel/desativado) já eram
+                # não-sucesso. Se houve ao menos 1 voto real, o passo 3 serve do cache (sem rede).
+                lote_teve_sucesso = any(
+                    getattr(voto, "fonte", None) not in (None, "erro", "timeout", "indisponivel", "desativado", "throttle")
+                    for voto in (votos_lote or {}).values()
+                )
+                if not lote_teve_sucesso:
+                    simbolos_elegiveis = []
+
+            for simbolo in simbolos_elegiveis:
+                snapshot = snapshots[simbolo]
+                sinais[simbolo] = await gerar_sinal_orquestrado(
+                    simbolo=simbolo,
+                    klines=snapshot.get("klines") or [],
+                    livro_topo=snapshot.get("livro_topo"),
+                    noticias=noticias_por_simbolo_snapshot.get(simbolo),
+                    saldo=saldo_contexto,
+                    ajustes_sinal=ajustes_sinal_exec,
+                    analista_ia=analista_ia,
+                )
 
         scanner = ranquear_oportunidades(
             snapshots=snapshots,

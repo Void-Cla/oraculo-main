@@ -1,0 +1,6 @@
+{
+  "name": "Drive Folder Analyzer",
+  "description": "Sistema de Trading Algorítmico Oráculo com Previsão Direcional, IA em intervalos de 2h, Treino Contínuo e Regra de Lucro Líquido (+0,01 centavo)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

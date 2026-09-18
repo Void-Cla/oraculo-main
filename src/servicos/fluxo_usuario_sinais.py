@@ -16,6 +16,7 @@ from src.persistencia.repositorio_snapshot import atualizar_snapshot
 from src.persistencia.repositorio_usuarios import RepositorioUsuarios
 from src.risco.risk_engine import avaliar_sinal_para_usuario
 from src.servicos.ajustes import obter_ajustes_risco, obter_ajustes_sinal
+from src.servicos.auto_governanca import governar_risco_autonomo
 from src.servicos.noticias import obter_noticias_para_peso
 from src.sinais.fila_sinais import fila_sinais_global
 from src.sinais.signal_engine import gerar_sinal_orquestrado
@@ -76,7 +77,9 @@ async def executar_fluxo_usuario_sinal(usuario_id: int, payload: dict[str, Any])
         noticias_cache = await obter_noticias_para_peso(simbolo=simbolo)
         noticias = list(noticias_cache.get("itens", []))
 
-    sinal = gerar_sinal_orquestrado(
+    # `gerar_sinal_orquestrado` é async desde 2026-07-01 (voto direcional de peso igual da
+    # IA, opt-in via `analista_ia` — não injetado neste fluxo manual/usuário hoje).
+    sinal = await gerar_sinal_orquestrado(
         simbolo=simbolo,
         klines=klines,
         livro_topo=livro_topo,

@@ -13,9 +13,20 @@ def _klines_tendencia_alta():
     return klines
 
 
-def test_signal_engine_gera_sinal_com_regime_e_estrategia():
+def _klines_mercado_plano():
+    """Preço parado (sem movimento/edge) — gera EV líquido NEGATIVO (custo > sinal),
+    o cenário mais comum em produção (a maioria dos ciclos não tem oportunidade real).
+    Usado para provar o GATE DE MOMENTO CRÍTICO (DA-30): a IA não deve ser consultada aqui."""
+    klines = []
+    for idx in range(1, 31):
+        close = 100.0
+        klines.append([idx, close - 0.01, close + 0.01, close - 0.01, close, 20.0])
+    return klines
+
+
+async def test_signal_engine_gera_sinal_com_regime_e_estrategia():
     klines = _klines_tendencia_alta()
-    sinal = gerar_sinal_orquestrado(
+    sinal = await gerar_sinal_orquestrado(
         simbolo="BTCUSDT",
         klines=klines,
         livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
@@ -36,7 +47,42 @@ def test_signal_engine_gera_sinal_com_regime_e_estrategia():
     assert "janela_decisao" in sinal
 
 
-def test_signal_engine_repassa_parametros_probabilisticos_personalizados(monkeypatch):
+def _klines_subida_suave_012pct():
+    """+0.12% em TODAS as janelas (1/5/10/15m): abaixo do limiar padrão de janela (0.15%)
+    e acima do limiar relaxado do modo exploração (0.08%)."""
+    klines = [[idx, 100.0, 100.2, 99.8, 100.0, 20.0] for idx in range(1, 30)]
+    klines.append([30, 100.0, 100.3, 99.9, 100.12, 20.0])
+    return klines
+
+
+async def test_confirmacao_multi_timeframe_limiar_de_janela_parametrizavel():
+    """`signal_janela_limiar_pct` (escrito pelo modo exploração testnet — decisão do dono,
+    2026-07-12) relaxa a classificação UP/FLAT das janelas SEM tocar o default de produção:
+    sem o ajuste, 0.12% segue FLAT (bloqueia BUY); com 0.08%, vira UP nas 4 janelas."""
+    klines = _klines_subida_suave_012pct()
+    livro = {"bid_price": 100.11, "bid_qty": 5.0, "ask_price": 100.13, "ask_qty": 4.0}
+
+    padrao = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=klines,
+        livro_topo=livro,
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+    )
+    assert padrao["confirmacao_multi_timeframe"]["permitir_buy"] is False  # 0.12% < 0.15% → FLAT
+
+    relaxado = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=klines,
+        livro_topo=livro,
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        ajustes_sinal={"signal_confirm_threshold": 1, "signal_janela_limiar_pct": 0.0008},
+    )
+    confirmacao = relaxado["confirmacao_multi_timeframe"]
+    assert confirmacao["score_buy"] == 4          # 0.12% ≥ 0.08% → UP nas 4 janelas
+    assert confirmacao["permitir_buy"] is True
+
+
+async def test_signal_engine_repassa_parametros_probabilisticos_personalizados(monkeypatch):
     from src.sinais import signal_engine
 
     capturado = {}
@@ -99,7 +145,7 @@ def test_signal_engine_repassa_parametros_probabilisticos_personalizados(monkeyp
     )
     monkeypatch.setattr(signal_engine, "ProbabilisticTradeEngine", _PTEFake)
 
-    sinal = gerar_sinal_orquestrado(
+    sinal = await gerar_sinal_orquestrado(
         simbolo="BTCUSDT",
         klines=_klines_tendencia_alta(),
         livro_topo={"bid_price": 100.0, "bid_qty": 2.0, "ask_price": 100.1, "ask_qty": 2.0},
@@ -148,7 +194,7 @@ def test_volatility_scalping_permite_entrada_em_low_vol_com_micro_pressao_favora
     assert sinal["estrategia"] == "volatility_scalping"
 
 
-def test_signal_engine_usa_ev_probabilistico_para_validar_microtrade(monkeypatch):
+async def test_signal_engine_usa_ev_probabilistico_para_validar_microtrade(monkeypatch):
     from src.sinais import signal_engine
 
     class _PTEFake:
@@ -215,7 +261,7 @@ def test_signal_engine_usa_ev_probabilistico_para_validar_microtrade(monkeypatch
     )
     monkeypatch.setattr(signal_engine, "ProbabilisticTradeEngine", _PTEFake)
 
-    sinal = gerar_sinal_orquestrado(
+    sinal = await gerar_sinal_orquestrado(
         simbolo="ETHUSDT",
         klines=_klines_tendencia_alta(),
         livro_topo={"bid_price": 100.0, "bid_qty": 2.0, "ask_price": 100.01, "ask_qty": 2.0},
@@ -234,7 +280,157 @@ def test_signal_engine_usa_ev_probabilistico_para_validar_microtrade(monkeypatch
     assert sinal["lucro_liquido_esperado_pct"] == pytest.approx(0.00135)
 
 
-def test_signal_engine_nao_mata_compra_forte_por_multi_timeframe_parcial(monkeypatch):
+# ── Voto direcional de peso igual da IA (Parte C — wiring async ponta a ponta) ──────────────
+async def test_signal_engine_sem_analista_ia_usa_voto_neutro_default():
+    """Sem `analista_ia` injetado (comportamento padrão, sem GEMINI_API_KEY) — a fonte
+    "ia_gemini" deve existir no consenso com voto neutro (confianca=0.0), preservando o
+    comportamento anterior à mudança de arquitetura."""
+    sinal = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_tendencia_alta(),
+        livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+    )
+    assert sinal["voto_ia"]["acao"] == "HOLD"
+    assert sinal["voto_ia"]["confianca"] == 0.0
+    assert sinal["voto_ia"]["fonte"] == "indisponivel"
+    fontes = {f["nome"]: f for f in sinal["consenso"]["fontes"]}
+    assert "ia_gemini" in fontes
+    assert fontes["ia_gemini"]["score"] == 0.0
+
+
+async def test_signal_engine_com_analista_ia_propaga_voto_para_consenso():
+    """Com `analista_ia` injetado (mock, sem rede real) — o voto direcional deve chegar ao
+    consenso com o score/confiança reportados pela IA, provando o wiring assíncrono ponta a
+    ponta (signal_engine → AnalistaMercadoIA.avaliar_direcional → consolidar_decisao)."""
+    from src.intelligence.market_analyst import VotoIA
+
+    class _AnalistaFake:
+        async def avaliar_direcional(self, *, simbolo, sinal_mecanico=None, saldo=0.0, noticias=None):
+            assert sinal_mecanico is not None  # é passado, mas o fake não precisa usá-lo
+            return VotoIA(acao="BUY", score_direcional=0.8, confianca=0.9, rationale="teste", fonte="gemini", sentimento_mercado=0.4)
+
+    sinal = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_tendencia_alta(),
+        livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        analista_ia=_AnalistaFake(),
+    )
+    assert sinal["voto_ia"]["acao"] == "BUY"
+    assert sinal["voto_ia"]["confianca"] == pytest.approx(0.9)
+    fontes = {f["nome"]: f for f in sinal["consenso"]["fontes"]}
+    assert fontes["ia_gemini"]["score"] == pytest.approx(0.8 * 0.9)
+    assert fontes["ia_gemini"]["peso"] == fontes["estrategia"]["peso"]  # peso nominal igual
+
+
+async def test_signal_engine_sem_ev_acionavel_nao_consulta_ia():
+    """GATE DE MOMENTO CRÍTICO (DA-30): mercado plano ⇒ EV líquido mecânico não passa do
+    piso `signal_min_ev` ⇒ `avaliar_direcional` NUNCA é chamado (economiza cota de IA nos
+    ciclos sem oportunidade real, que são a maioria). O voto permanece neutro/indisponível
+    — mesmo resultado de "sem analista_ia", mas por motivo diferente (gate, não ausência)."""
+    chamadas = {"n": 0}
+
+    class _AnalistaEspiao:
+        async def avaliar_direcional(self, *, simbolo, sinal_mecanico=None, saldo=0.0, noticias=None):
+            chamadas["n"] += 1
+            from src.intelligence.market_analyst import VotoIA
+
+            return VotoIA(acao="BUY", score_direcional=0.9, confianca=0.9, fonte="gemini")
+
+    sinal = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_mercado_plano(),
+        livro_topo={"bid_price": 99.99, "bid_qty": 5.0, "ask_price": 100.01, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        analista_ia=_AnalistaEspiao(),
+    )
+
+    pt = sinal["probabilidade_trade"]
+    assert max(float(pt.get("ev_buy", 0.0)), float(pt.get("ev_sell", 0.0))) <= 0.0001  # sem EV acionável
+    assert chamadas["n"] == 0  # a IA NÃO foi consultada
+    assert sinal["voto_ia"]["acao"] == "HOLD"
+    assert sinal["voto_ia"]["confianca"] == 0.0
+    assert sinal["voto_ia"]["fonte"] == "indisponivel"
+
+
+async def test_signal_engine_com_ev_acionavel_consulta_ia():
+    """Contraprova do gate: quando o EV mecânico JÁ é acionável (tendência clara), a IA
+    é sim consultada — o gate filtra por qualidade do sinal, não desliga a camada agêntica."""
+    chamadas = {"n": 0}
+
+    class _AnalistaEspiao:
+        async def avaliar_direcional(self, *, simbolo, sinal_mecanico=None, saldo=0.0, noticias=None):
+            chamadas["n"] += 1
+            from src.intelligence.market_analyst import VotoIA
+
+            return VotoIA(acao="BUY", score_direcional=0.8, confianca=0.9, fonte="gemini")
+
+    sinal = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_tendencia_alta(),
+        livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        analista_ia=_AnalistaEspiao(),
+    )
+
+    pt = sinal["probabilidade_trade"]
+    assert max(float(pt.get("ev_buy", 0.0)), float(pt.get("ev_sell", 0.0))) > 0.0001
+    assert chamadas["n"] == 1  # a IA FOI consultada — havia oportunidade mecânica real
+
+
+async def test_signal_engine_gate_respeita_piso_customizado_de_ev(monkeypatch):
+    """`signal_min_ev` customizado via `ajustes_sinal` recalibra o gate (mesmo piso usado
+    pelo gate de EV mecânico — não é uma constante nova e desalinhada)."""
+    chamadas = {"n": 0}
+
+    class _AnalistaEspiao:
+        async def avaliar_direcional(self, *, simbolo, sinal_mecanico=None, saldo=0.0, noticias=None):
+            chamadas["n"] += 1
+            from src.intelligence.market_analyst import VotoIA
+
+            return VotoIA(acao="HOLD", score_direcional=0.0, confianca=0.1, fonte="gemini")
+
+    # Piso ABSURDAMENTE alto — nem a tendência de alta (EV~0.004) deve passar.
+    await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_tendencia_alta(),
+        livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        ajustes_sinal={"signal_min_ev": 10.0},
+        analista_ia=_AnalistaEspiao(),
+    )
+    assert chamadas["n"] == 0
+
+
+async def test_signal_engine_analista_ia_com_falha_nao_derruba_o_sinal(monkeypatch):
+    """Se `analista_ia.avaliar_direcional` lançar (bug no mock/implementação externa), o
+    sinal mecânico ainda deve ser gerado normalmente (fail-safe belt-and-suspenders em
+    signal_engine, além do fail-safe interno do AnalistaMercadoIA)."""
+
+    class _AnalistaQuebrado:
+        async def avaliar_direcional(self, **kwargs):
+            raise RuntimeError("falha inesperada no analista")
+
+    sinal = await gerar_sinal_orquestrado(
+        simbolo="BTCUSDT",
+        klines=_klines_tendencia_alta(),
+        livro_topo={"bid_price": 117.89, "bid_qty": 5.0, "ask_price": 117.91, "ask_qty": 4.0},
+        noticias=[],
+        saldo={"saldo_total": 1000.0, "saldo_livre": 900.0},
+        analista_ia=_AnalistaQuebrado(),
+    )
+    assert sinal["voto_ia"]["acao"] == "HOLD"
+    assert sinal["voto_ia"]["confianca"] == 0.0
+    assert "acao" in sinal  # o sinal mecanico foi gerado normalmente, apesar da falha na IA
+
+
+async def test_signal_engine_nao_mata_compra_forte_por_multi_timeframe_parcial(monkeypatch):
     from src.sinais import signal_engine
 
     class _PTEFake:
@@ -318,7 +514,7 @@ def test_signal_engine_nao_mata_compra_forte_por_multi_timeframe_parcial(monkeyp
     )
     monkeypatch.setattr(signal_engine, "ProbabilisticTradeEngine", _PTEFake)
 
-    sinal = gerar_sinal_orquestrado(
+    sinal = await gerar_sinal_orquestrado(
         simbolo="BTCUSDT",
         klines=_klines_tendencia_alta(),
         livro_topo={"bid_price": 100.0, "bid_qty": 2.0, "ask_price": 100.01, "ask_qty": 2.0},

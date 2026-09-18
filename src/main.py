@@ -34,6 +34,7 @@ from src.executor.gerenciador_ordens import GerenciadorOrdens
 from src.modelagem.gerenciador_modelo import GerenciadorModelo
 from src.multiativo.config import validar_par_monitorado
 from src.multiativo.orquestrador import montar_monitoramento_multiativo
+from src.observabilidade.alertas import disparar_alerta_background
 from src.observabilidade.audit import registrar_audit
 from src.observabilidade.logger import get_logger
 from src.observabilidade.metricas import (
@@ -220,6 +221,14 @@ async def _inicializar_retomada(app: FastAPI) -> asyncio.Task | None:
         await RepositorioConfig.definir("retomada_contexto", contexto)
         await registrar_audit("retomada_bloqueio_preservado", "retomada", motivo_bloqueio, simbolo=simbolo, meta=contexto)
         LOG.error("retomada_bloqueio_preservado", extra={"simbolo": simbolo, "motivo": motivo_bloqueio})
+        # G2 (up.md P0): o bot reiniciou e PERMANECE em halt (reset é só humano, DA-03) — o dono
+        # precisa saber que o processo subiu mas está parado, não assumir que está operando.
+        disparar_alerta_background(
+            chave="boot_ainda_em_halt",
+            titulo="Bot reiniciou e permanece em HALT — reset requer ação humana",
+            simbolo=simbolo,
+            motivo=motivo_bloqueio,
+        )
         return None
     try:
         contexto = await avaliar_retomada(simbolo, ajustes=ajustes)
@@ -288,11 +297,56 @@ async def lifespan(app: FastAPI):
     tarefa_coleta: asyncio.Task | None = None
     if os.getenv("ATIVAR_COLETA_CONTINUA", "false").lower() == "true":
         tarefa_coleta = asyncio.create_task(loop_coleta_continua())
+    # === CAMADA AGÊNTICA DE IA (opt-in, provedor plugável) ===
+    # O provedor é escolhido por `AI_PROVIDER` (gemini|gpt|claude). `criar_provedor_ia()`
+    # devolve o cliente concreto correspondente OU None se a chave do provedor escolhido
+    # não estiver configurada — preservando o comportamento antigo de "sem chave = IA
+    # desativada, bot idêntico ao anterior".
+    tarefa_auditor: asyncio.Task | None = None
+    shutdown_auditor = asyncio.Event()
+    app.state.provedor_ia = None
+    from src.intelligence.provedor_ia import criar_provedor_ia
+
+    provedor = criar_provedor_ia()
+    if provedor is not None:
+        from src.intelligence.market_analyst import AnalistaMercadoIA
+        from src.intelligence.post_trade_auditor import PostTradeAuditor
+        from src.intelligence.pre_execution_filter import PreExecutionFilter
+
+        # Instância ÚNICA do provedor compartilhada entre as 3 camadas agênticas
+        # (PreExecutionFilter = veto pós-gates, AnalistaMercadoIA = voto de peso igual
+        # pré-gates, PostTradeAuditor = auditoria em background). Evita cliente HTTP
+        # duplicado; o cost-control (limite dia/hora/cooldown) é POR INSTÂNCIA —
+        # compartilhar significa que as 3 camadas dividem o MESMO orçamento de
+        # chamadas/hora (IA_MAX_CALLS_HORA / legado GEMINI_MAX_CALLS_HORA), o que é
+        # intencional (custo previsível, um único teto por processo; consultar as duas
+        # camadas de decisão por ciclo consome 2x o orçamento — aceitável, documentado aqui).
+        app.state.provedor_ia = provedor
+        if os.getenv("AI_FILTER_ENABLED", "true").lower() == "true":
+            AUTO_TRADER.definir_filtro_ia(PreExecutionFilter(provedor, habilitado=True))
+            LOG.info("camada_agentica_filtro_ativo")
+        # Voto direcional de peso igual (opt-in, decisão de 2026-07-01) — coexiste com o
+        # PreExecutionFilter (veto). Mesma flag AI_FILTER_ENABLED controla ambos: ligar/
+        # desligar a camada agêntica de decisão como um todo continua sendo 1 interruptor.
+        if os.getenv("AI_FILTER_ENABLED", "true").lower() == "true":
+            AUTO_TRADER.definir_analista_ia(AnalistaMercadoIA(provedor, habilitado=True))
+            LOG.info("camada_agentica_voto_direcional_ativo")
+        if os.getenv("AI_AUDITOR_ENABLED", "true").lower() == "true":
+            tarefa_auditor = asyncio.create_task(
+                PostTradeAuditor(provedor).run_loop(shutdown_auditor)
+            )
+        LOG.info(
+            "camada_agentica_ia_inicializada",
+            extra={"provedor": provedor.health().get("provedor")},
+        )
+    else:
+        LOG.info("camada_agentica_ia_desativada_sem_chave")
     app.state.tarefa_loop = tarefa_loop
     app.state.tarefa_consumidor = tarefa_consumidor
     app.state.tarefa_carga_teste = tarefa_carga_teste
     app.state.tarefa_observacao = tarefa_observacao
     app.state.tarefa_coleta = tarefa_coleta
+    app.state.tarefa_auditor = tarefa_auditor
     LOG.info(
         "app_iniciada",
         extra={
@@ -319,6 +373,10 @@ async def lifespan(app: FastAPI):
         if tarefa_coleta is not None:
             tarefa_coleta.cancel()
             await asyncio.gather(tarefa_coleta, return_exceptions=True)
+        if tarefa_auditor is not None:
+            shutdown_auditor.set()
+            tarefa_auditor.cancel()
+            await asyncio.gather(tarefa_auditor, return_exceptions=True)
         await TESTNET_TRADER.encerrar_todos()
         LOG.info("app_finalizada")
 
@@ -444,10 +502,14 @@ async def serve_css() -> PlainTextResponse:
 @app.get("/img/{filename}", include_in_schema=False)
 async def serve_img(filename: str) -> Response:
     from fastapi.responses import FileResponse
-    f = _FRONTEND_DIR / "img" / filename
-    if not f.exists() or not f.is_file():
+    # Anti path-traversal: canonicaliza e exige que o alvo esteja CONTIDO em frontend/img.
+    base = (_FRONTEND_DIR / "img").resolve()
+    alvo = (base / filename).resolve()
+    if alvo != base and base not in alvo.parents:
+        raise HTTPException(status_code=403, detail="caminho_invalido")
+    if not alvo.exists() or not alvo.is_file():
         raise HTTPException(status_code=404)
-    return FileResponse(str(f))
+    return FileResponse(str(alvo))
 
 
 @app.get("/v1/health")
@@ -497,6 +559,64 @@ async def status_edge() -> dict[str, Any]:
     from src.risco.edge_config import resumo_edge
 
     return await resumo_edge()
+
+
+@app.get("/v1/kill-switch")
+async def status_kill_switch() -> dict[str, Any]:
+    """Estado do kill-switch financeiro. Engatar/destravar é operação de arquivo (panic button):
+    `touch $KILL_SWITCH_PATH` bloqueia TODA ordem; `rm` libera (ação humana)."""
+    from src.core.kill_switch import estado
+
+    return estado()
+
+
+def _saude_provedor_ia() -> dict[str, Any]:
+    """Saúde do provedor de IA ativo. Pode ser rotativo com fallback configurado."""
+    provedor = getattr(app.state, "provedor_ia", None)
+    if provedor is None:
+        return {"disponivel": False, "motivo": "camada_agentica_desativada_sem_chave"}
+    return provedor.health()
+
+
+def _saude_gemini() -> dict[str, Any]:
+    """Saúde específica do Gemini, sem fallback para outro provedor."""
+    from src.intelligence.provedor_ia import criar_provedor_ia_especifico
+
+    provedor = criar_provedor_ia_especifico("gemini")
+    if provedor is None:
+        return {"provedor": "gemini", "disponivel": False, "chave_presente": False}
+    return provedor.health()
+
+
+@app.get("/v1/ai/provedor/saude")
+async def status_ia_provedor() -> dict[str, Any]:
+    """Saúde da camada agêntica de DECISÃO (provedor plugável via AI_PROVIDER: gemini|gpt|claude).
+
+    Nota: `/v1/ai/saude` (já existente) é a saúde do `ai_advisor` consultivo SEPARADO — não
+    confundir com esta rota, que expõe o provedor da camada de decisão (veto/voto/auditoria)."""
+    return _saude_provedor_ia()
+
+
+@app.get("/v1/ai/gemini/saude")
+async def status_gemini() -> dict[str, Any]:
+    """Saúde específica do Gemini. Não mascara falta de chave com fallback de outro provedor."""
+    return _saude_gemini()
+
+
+@app.get("/v1/ai/vetos")
+async def listar_vetos_ia(limit: int = 20) -> dict[str, Any]:
+    """Operações que a IA VETOU (para medir eficácia do filtro)."""
+    registros = await RepositorioAuditoria.listar_recentes(limite=max(1, min(limit, 200)))
+    vetos = [r for r in registros if (r.get("componente") == "ai_pre_execution_filter")
+             or str(r.get("tipo", "")).startswith("vetado_por_ia")]
+    return {"total": len(vetos), "vetos": vetos}
+
+
+@app.get("/v1/ai/auditorias")
+async def listar_auditorias_ia(limit: int = 10) -> dict[str, Any]:
+    """Auditorias pós-trade da IA (padrões de perda/ganho, recomendações)."""
+    registros = await RepositorioAuditoria.listar_recentes(tipo="auditoria_2h", limite=max(1, min(limit, 100)))
+    return {"total": len(registros), "auditorias": registros}
 
 
 @app.get("/v1/diagnostico")
@@ -563,6 +683,27 @@ async def sair_sessao(request: Request, response: Response) -> dict[str, Any]:
     return {"autenticado": False}
 
 
+@app.get("/v1/sessao/ia/chaves")
+async def listar_chaves_ia(request: Request) -> dict[str, Any]:
+    await _sessao_autenticada(request)
+    provedores = {
+        "claude": ("CLAUDE_API_KEY", "ANTHROPIC_API_KEY"),
+        "gemini": ("GEMINI_API_KEY", "GEMINI_API_KEYS"),
+        "gpt": ("GPT_API_KEY", "OPENAI_API_KEY"),
+        "nvidia": ("NVIDIA_API_KEY", "NVIDIA_API_KEYS", "NVAPI_KEY"),
+    }
+    return {
+        "provedores": [
+            {
+                "provedor": nome,
+                "configurada": any(bool(os.getenv(variavel, "").strip()) for variavel in variaveis),
+            }
+            for nome, variaveis in provedores.items()
+        ],
+        "gerenciamento_por_sessao_habilitado": False,
+    }
+
+
 @app.get("/v1/testnet/auto/status")
 async def status_auto_testnet(request: Request) -> dict[str, Any]:
     sessao = await _sessao_autenticada(request)
@@ -589,6 +730,31 @@ async def iniciar_auto_testnet(request: Request, entrada: AutoTradeEntrada) -> d
     return {"status": status, "ajustes": ajustes}
 
 
+# Fallback conservador quando a % da carteira não pode ser resolvida (saldo inconsultável):
+# opera pequeno em vez de grande — fail-safe de capital, nunca aplicado em silêncio (sempre logado).
+_NOTIONAL_FALLBACK_USDT = 10.0
+
+
+async def _notional_por_capital_pct(sessao: dict[str, Any], capital_pct: int) -> float:
+    """Converte a % da carteira (slider do front) no notional absoluto em USDT livre da conta."""
+    cliente = ClienteBinance(
+        api_key=str(sessao["api_key"]),
+        api_secret=str(sessao["api_secret"]),
+        testnet=bool(sessao.get("modo_testnet", False)),
+    )
+    try:
+        conta_raw = await cliente.obter_conta_raw()
+    finally:
+        await cliente.fechar()
+    saldo_usdt = 0.0
+    for saldo in (conta_raw.get("balances") or []):
+        if saldo.get("asset") == "USDT":
+            saldo_usdt = float(saldo.get("free") or 0.0)
+            break
+    pct = max(10, min(100, int(capital_pct)))
+    return round(saldo_usdt * pct / 100.0, 2)
+
+
 @app.post("/v1/auto/start")
 async def iniciar_auto(request: Request, entrada: AutoTradeEntrada) -> dict[str, Any]:
     sessao = await _sessao_autenticada(request)
@@ -599,19 +765,19 @@ async def iniciar_auto(request: Request, entrada: AutoTradeEntrada) -> dict[str,
     # Resolver capital_pct → notional_usdt
     if entrada.capital_pct and not entrada.notional_usdt:
         try:
-            cliente = ClienteBinance(sessao)
-            conta_raw = await cliente.obter_conta_raw()
-            saldo_usdt = 0.0
-            for b in (conta_raw.get("balances") or []):
-                if b.get("asset") == "USDT":
-                    saldo_usdt = float(b.get("free") or 0.0)
-                    break
-            pct = max(10, min(100, int(entrada.capital_pct)))
-            dados["notional_usdt"] = round(saldo_usdt * pct / 100.0, 2)
-        except Exception:
-            dados["notional_usdt"] = 10.0
-    dados.setdefault("notional_usdt", 10.0)
-    dados["notional_usdt"] = max(1.0, float(dados["notional_usdt"] or 10.0))
+            dados["notional_usdt"] = await _notional_por_capital_pct(sessao, entrada.capital_pct)
+        except Exception as exc:
+            LOG.warning(
+                "capital_pct_nao_resolvido_usando_fallback",
+                extra={
+                    "capital_pct": entrada.capital_pct,
+                    "fallback_notional_usdt": _NOTIONAL_FALLBACK_USDT,
+                    "erro": str(exc),
+                },
+            )
+            dados["notional_usdt"] = _NOTIONAL_FALLBACK_USDT
+    dados.setdefault("notional_usdt", _NOTIONAL_FALLBACK_USDT)
+    dados["notional_usdt"] = max(1.0, float(dados["notional_usdt"] or _NOTIONAL_FALLBACK_USDT))
     ajustes = await salvar_ajustes_testnet(dados)
     token = request.cookies.get("oraculo_sessao")
     status = await AUTO_TRADER.iniciar(token or "", sessao, ajustes["aplicado"])

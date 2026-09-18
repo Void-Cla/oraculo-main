@@ -5,11 +5,15 @@ import time
 from typing import Any
 
 from src.calculos.gerador_features import calcular_features_1m
+from src.intelligence.market_analyst import VotoIA
 from src.meta_strategy.meta_controller import gerar_sinal_meta
 from src.meta_strategy.regime_detector import detectar_regime
 from src.modelagem.preditor import preditor_end_to_end
+from src.observabilidade.logger import get_logger
 from src.probabilidade.probabilistic_engine import ProbabilisticTradeEngine
 from src.sinais.consenso import consolidar_decisao
+
+LOG = get_logger("signal_engine")
 
 
 def _clamp(valor: float, minimo: float, maximo: float) -> float:
@@ -82,7 +86,14 @@ def _contexto_mercado(klines: list[Any]) -> dict[str, Any]:
     }
 
 
-def _direcao_janela(closes: list[float], passos: int, limiar: float = 0.0003) -> tuple[str, float]:
+# Limiar de retorno p/ classificar janela como UP/DOWN em vez de FLAT: 15 bps (0.0015),
+# ≈1.5 desvio-padrão do retorno típico de 1 minuto do BTC. Antes, 3 bps (0.0003) fazia
+# ~85% das janelas serem classificadas UP ou DOWN (raramente FLAT), saturando o score
+# direcional quase sempre e tornando a confirmação multi-timeframe pouco discriminativa.
+LIMIAR_RETORNO_JANELA_PADRAO: float = 0.0015
+
+
+def _direcao_janela(closes: list[float], passos: int, limiar: float = LIMIAR_RETORNO_JANELA_PADRAO) -> tuple[str, float]:
     if len(closes) <= passos:
         passos = max(1, len(closes) - 1)
     if passos <= 0:
@@ -99,7 +110,11 @@ def _direcao_janela(closes: list[float], passos: int, limiar: float = 0.0003) ->
     return ("FLAT", retorno)
 
 
-def _confirmacao_multi_timeframe(klines: list[Any], limiar_confirmacao: int) -> dict[str, Any]:
+def _confirmacao_multi_timeframe(
+    klines: list[Any],
+    limiar_confirmacao: int,
+    limiar_retorno: float = LIMIAR_RETORNO_JANELA_PADRAO,
+) -> dict[str, Any]:
     norm = _normalizar_klines(klines, limite=20)
     closes = [float(item["close"]) for item in norm]
     janelas = {1: "1m", 5: "5m", 10: "10m", 15: "15m"}
@@ -108,7 +123,7 @@ def _confirmacao_multi_timeframe(klines: list[Any], limiar_confirmacao: int) -> 
     score_sell = 0
     retornos: list[float] = []
     for passos, nome in janelas.items():
-        direcao, retorno = _direcao_janela(closes, passos)
+        direcao, retorno = _direcao_janela(closes, passos, limiar=limiar_retorno)
         tendencias[nome] = {"direcao": direcao, "retorno": retorno}
         retornos.append(retorno)
         if direcao == "UP":
@@ -154,7 +169,7 @@ def _janela_decisao(ts_referencia: int, janela_minutos: int) -> dict[str, Any]:
     }
 
 
-def gerar_sinal_orquestrado(
+async def gerar_sinal_orquestrado(
     simbolo: str,
     klines: list[Any],
     livro_topo: dict[str, Any] | None = None,
@@ -163,14 +178,37 @@ def gerar_sinal_orquestrado(
     *,
     force_allow_for_testnet: bool | None = None,
     ajustes_sinal: dict[str, Any] | None = None,
+    analista_ia: Any | None = None,
 ) -> dict[str, Any]:
+    """Orquestra o pipeline completo de geração de sinal (features → regime → estratégias →
+    previsão ML → consenso ponderado → EV).
+
+    ASSÍNCRONA desde 2026-07-01: o voto direcional de peso igual da IA (`AnalistaMercadoIA`,
+    ver `src/intelligence/market_analyst.py`) exige uma chamada de rede. `analista_ia` é
+    OPT-IN — se `None` (padrão, comportamento idêntico ao anterior), a fonte "ia_gemini" do
+    consenso usa `VotoIA()` default (acao=HOLD, confianca=0.0), que já colapsa a ~zero na
+    média ponderada (ver `consenso.py`). Isso preserva o comportamento pré-existente quando o
+    caller não passa um analista (ex.: sem GEMINI_API_KEY configurada).
+    """
     ajustes_sinal = ajustes_sinal or {}
+    is_performance_mode = bool(ajustes_sinal.get("performance_mode", False))
     sent_score = _sentimento_medio_noticias(noticias)
     features = calcular_features_1m(klines, livro_topo=livro_topo, sent_score=sent_score)
     regime_info = detectar_regime(features)
     contexto = _contexto_mercado(klines)
-    limiar_confirmacao = int(ajustes_sinal.get("signal_confirm_threshold", 1))
-    confirmacao = _confirmacao_multi_timeframe(klines, limiar_confirmacao)
+    # Default 3 de 4 janelas temporais (1m/5m/10m/15m) alinhadas p/ confirmar.
+    # Em modo performance, reduzimos para 1 de 4 para execução imediata.
+    LIMIAR_CONFIRMACAO_PADRAO = 1 if is_performance_mode else 3
+    limiar_confirmacao = int(ajustes_sinal.get("signal_confirm_threshold", LIMIAR_CONFIRMACAO_PADRAO))
+    # Limiar de retorno por janela parametrizável via ajustes (`signal_janela_limiar_pct`):
+    # o modo exploração (testnet-only) relaxa p/ 0.08% — em LOW_VOL, o padrão de 0.15%
+    # mantinha o bot em HOLD por horas mesmo em exploração. Clamp inferior evita 0/negativo
+    # (que classificaria toda janela como UP e anularia a confirmação).
+    limiar_janela = max(
+        0.0001,
+        float(ajustes_sinal.get("signal_janela_limiar_pct", LIMIAR_RETORNO_JANELA_PADRAO) or LIMIAR_RETORNO_JANELA_PADRAO),
+    )
+    confirmacao = _confirmacao_multi_timeframe(klines, limiar_confirmacao, limiar_retorno=limiar_janela)
     previsao = preditor_end_to_end(
         simbolo=simbolo,
         features=features,
@@ -199,7 +237,13 @@ def gerar_sinal_orquestrado(
     signal_min_ev = float(ajustes_sinal.get("signal_min_ev", 0.0001))
     signal_min_prob = float(ajustes_sinal.get("signal_min_prob", 0.55))
     signal_prob_temperature = float(ajustes_sinal.get("signal_prob_temperature", 1.0))
-    signal_prob_scale = float(ajustes_sinal.get("signal_prob_scale", 10.0))
+    # Escala do logit no calibrador de probabilidade. Com scale=10, uma predição típica
+    # de 0.5% de movimento (raw=0.005) gera logit=0.05, sigmoid≈0.512 — o modelo ML quase
+    # não move a probabilidade calibrada para longe de 0.5, sendo dominado pelo ajuste
+    # externo (confirmação/sentimento). Com scale=200, a mesma predição gera logit=1.0,
+    # sigmoid≈0.73 — o modelo passa a ter peso real na decisão em vez de saturar/ficar mudo.
+    SIGNAL_PROB_SCALE_PADRAO = 200.0
+    signal_prob_scale = float(ajustes_sinal.get("signal_prob_scale", SIGNAL_PROB_SCALE_PADRAO))
 
     pte = ProbabilisticTradeEngine(
         fee=taxa_trade,
@@ -231,7 +275,39 @@ def gerar_sinal_orquestrado(
     elif sinal["acao"] == "SELL":
         lucro_liquido_esperado = ev_sell
     else:
-        lucro_liquido_esperado = max(ev_buy, ev_sell)
+        # HOLD não tem EV acionável — nenhuma posição será aberta. Reportar o melhor EV
+        # teórico (max(ev_buy, ev_sell)) infla métricas de diagnóstico e distorce backtest,
+        # já que o valor nunca corresponde a um trade real executado.
+        lucro_liquido_esperado = 0.0
+
+    # Voto direcional de peso igual da IA (opt-in) — resolvido ANTES de `consolidar_decisao`
+    # (que é síncrona e pura de propósito, ver docstring de `consolidar_decisao`). Sem
+    # `analista_ia` injetado (padrão quando não há GEMINI_API_KEY), usa o `VotoIA()` default
+    # — HOLD/confianca=0.0 — que colapsa a ~zero na média ponderada da fonte "ia_gemini".
+    #
+    # GATE DE MOMENTO CRÍTICO (DA-30, 2026-07-01): a IA só é consultada quando o motor mecânico
+    # JÁ calculou EV líquido positivo (ev_buy ou ev_sell acima do mesmo piso `signal_min_ev`
+    # usado pelo gate de EV mecânico) para este símbolo. Em ciclo HOLD sem candidato — a
+    # maioria dos ciclos, por desenho, já que a maior parte do tempo não há edge — a IA NEM É
+    # CHAMADA. Isto ataca a causa raiz do 429/cooldown observado em produção: antes, TODO ciclo
+    # de TODO símbolo gastava 1 chamada de IA independente de haver oportunidade real; agora só
+    # os ciclos onde o "trabalho bruto" mecânico já encontrou algo acionável gastam cota. O voto
+    # da IA nunca decide sozinho (gate de EV segue intacto em `consolidar_decisao`/EV gate
+    # abaixo) — este filtro só evita PERGUNTAR quando a resposta não teria efeito prático.
+    ev_mecanico_acionavel = max(ev_buy, ev_sell) > signal_min_ev
+    voto_ia: VotoIA = VotoIA()
+    if analista_ia is not None and ev_mecanico_acionavel:
+        saldo_num = float((saldo or {}).get("saldo_total", 0.0) or 0.0)
+        try:
+            voto_ia = await analista_ia.avaliar_direcional(
+                simbolo=simbolo,
+                sinal_mecanico=sinal,
+                saldo=saldo_num,
+                noticias=noticias,
+            )
+        except Exception as exc:  # fail-safe: a IA jamais derruba a geração do sinal mecânico
+            LOG.error("falha_analista_ia_fail_safe", extra={"simbolo": simbolo, "erro": str(exc)})
+            voto_ia = VotoIA()
 
     consenso = consolidar_decisao(
         sinal_base=sinal,
@@ -242,10 +318,13 @@ def gerar_sinal_orquestrado(
         lucro_liquido_esperado=lucro_liquido_esperado,
         lucro_liquido_minimo=lucro_liquido_min,
         force_allow=force_allow,
+        score_direcional_ia=voto_ia.score_direcional,
+        confianca_ia=voto_ia.confianca,
     )
     sinal["acao"] = consenso["acao"]
     sinal["confianca"] = consenso["confianca"]
     sinal["motivo"] = f"{sinal.get('motivo', 'sinal_orquestrado')}; {consenso['motivo']}"
+    sinal["voto_ia"] = voto_ia.to_dict()
 
     sinal["ts"] = int(time.time() * 1000)
     sinal["confirmacao_multi_timeframe"] = confirmacao

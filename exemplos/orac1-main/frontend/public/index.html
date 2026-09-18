@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0a0713" />
+  <title>Oraculo | Bot autonomo multiativo</title>
+  <link rel="icon" type="image/png" href="/img/oraculo.png" />
+  <link rel="stylesheet" href="/estilos.css" />
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <section id="painelLogin" class="login-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Conexao Binance</p>
+          <h2>Entrar com a conta que o bot vai operar</h2>
+        </div>
+        <span class="badge badge--soft">Sessao segura</span>
+      </div>
+      <p class="muted">Os pesos, filtros e calibracao ficam automaticos. Aqui voce so conecta a conta, acompanha e liga ou desliga o bot.</p>
+      <form id="formLogin" class="login-form">
+        <label class="field">
+          <span>API key</span>
+          <input id="apiKey" type="password" autocomplete="off" spellcheck="false" required />
+        </label>
+        <label class="field">
+          <span>API secret</span>
+          <input id="apiSecret" type="password" autocomplete="off" spellcheck="false" required />
+        </label>
+        <label class="field field--toggle" for="usarTestnet">
+          <span>Ambiente</span>
+          <span class="toggle">
+            <input id="usarTestnet" type="checkbox" />
+            <span>Usar Binance Testnet</span>
+          </span>
+        </label>
+        <button id="btnEntrar" type="submit" class="btn btn--primary">Conectar</button>
+      </form>
+      <p id="mensagemLogin" class="muted">Informe as credenciais e escolha entre conta real e Testnet.</p>
+    </section>
+
+    <section id="painelApp" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="brand-card">
+          <img class="brand-card__logo" src="/img/oraculo.png" alt="Oraculo" />
+          <div>
+            <p class="eyebrow">Void-Hub</p>
+            <h1>Oraculo</h1>
+            <p class="muted">Painel executivo para conta, bot e noticias em tempo real.</p>
+          </div>
+        </div>
+
+        <div class="session-card">
+          <p class="eyebrow">Sessao</p>
+          <strong id="nomeSessao">Conta nao conectada</strong>
+          <span id="detalheSessao" class="muted">Sem sessao ativa</span>
+        </div>
+
+        <section class="status-card">
+          <p class="eyebrow">Status geral</p>
+          <div class="status-card__badges">
+            <span id="statusConexao" class="badge badge--info">Aguardando login</span>
+            <span id="statusModo" class="badge badge--info">Sem sessao</span>
+          </div>
+          <span id="ultimaAtualizacao" class="status-card__timestamp">Sem sincronizacao</span>
+          <p id="statusAviso" class="status-note status-note--info">Sem avisos.</p>
+        </section>
+
+        <nav class="nav-tabs" aria-label="Telas principais">
+          <button class="nav-tabs__item nav-tabs__item--active" type="button" data-tab="dashboard">Dashboard</button>
+          <button class="nav-tabs__item" type="button" data-tab="bot">Bot</button>
+          <button class="nav-tabs__item" type="button" data-tab="noticias">Noticias</button>
+        </nav>
+        <section class="sidebar-control">
+          <p class="eyebrow">Operacao</p>
+          <h2 id="tituloTela">Visao geral</h2>
+          <p id="subtituloTela" class="muted">Conta, mercado e execucao com leitura objetiva e sem ruido visual.</p>
+          <div class="sidebar-control__actions">
+            <button id="btnAtualizar" class="btn btn--secondary" type="button">Atualizar</button>
+            <button id="btnSair" class="btn btn--ghost" type="button">Sair</button>
+          </div>
+        </section>
+        <div class="sidebar-stack">
+          <article class="mini-card">
+            <span class="mini-card__label">Conta</span>
+            <strong id="sidebarConta">--</strong>
+            <span id="sidebarContaTexto" class="muted">Saldo total estimado</span>
+          </article>
+          <article class="mini-card">
+            <span class="mini-card__label">Modelo</span>
+            <strong id="sidebarModelo">Aguardando</strong>
+            <span id="sidebarModeloTexto" class="muted">Sem leitura recente</span>
+          </article>
+          <article class="mini-card">
+            <span class="mini-card__label">Bot</span>
+            <strong id="sidebarBot">Pausado</strong>
+            <span id="sidebarBotTexto" class="muted">Sem ciclo aberto</span>
+          </article>
+          <article class="mini-card">
+            <span class="mini-card__label">Noticias</span>
+            <strong id="sidebarNoticias">6 pares</strong>
+            <span id="sidebarNoticiasTexto" class="muted">Cobertura multipar</span>
+          </article>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section id="tab-dashboard" class="tab-view tab-view--active">
+          <section class="workspace-block workspace-block--personal">
+            <div class="block-head">
+              <p class="eyebrow">Minha conta</p>
+              <h3>Resumo pessoal</h3>
+              <p class="muted">Saldo, resultado e custos da operacao em leitura direta.</p>
+            </div>
+            <div class="grid grid--financial">
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">Conta</p>
+                    <h3>Resumo da conta</h3>
+                  </div>
+                  <span id="dashContaModo" class="badge badge--soft">--</span>
+                </div>
+                <div id="dashContaResumo" class="metric-list"></div>
+              </article>
+
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">Resultado</p>
+                    <h3>Lucro e desempenho</h3>
+                  </div>
+                  <span id="dashPnlStatus" class="badge badge--soft">--</span>
+                </div>
+                <div id="dashPnlResumo" class="metric-list"></div>
+              </article>
+
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">Custos</p>
+                    <h3>Taxas da conta</h3>
+                  </div>
+                  <span class="badge badge--soft">Binance</span>
+                </div>
+                <div id="dashTaxasResumo" class="metric-list"></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="workspace-block workspace-block--market">
+            <div class="block-head">
+              <p class="eyebrow">Mercado e decisao</p>
+              <h3>Leitura operacional</h3>
+              <p class="muted">Sinais, contexto de mercado e comparativos visuais com data.</p>
+            </div>
+            <div class="grid grid--summary">
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">Mercado</p>
+                    <h3>Leitura atual</h3>
+                  </div>
+                  <span id="dashMercadoStatus" class="badge badge--soft">--</span>
+                </div>
+                <div id="dashMercadoResumo" class="metric-list"></div>
+              </article>
+
+              <article class="panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">IA</p>
+                    <h3>Analise e previsao</h3>
+                  </div>
+                  <span id="dashAcaoAtual" class="badge badge--soft">Aguardando</span>
+                </div>
+                <div id="dashModeloResumo" class="metric-list"></div>
+                <p id="dashModeloMotivo" class="muted">Sem justificativa recente.</p>
+              </article>
+            </div>
+          </section>
+
+          <div class="grid grid--charts">
+            <article class="panel panel--wide">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Grafico</p>
+                  <h3>Preco recente</h3>
+                </div>
+                <span class="badge badge--soft">Mercado</span>
+              </div>
+              <svg id="chartPrecos" viewBox="0 0 720 240" preserveAspectRatio="none"></svg>
+            </article>
+
+            <article class="panel panel--wide">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Comparativo</p>
+                  <h3>Preco real vs previsao calibrada</h3>
+                </div>
+                <span class="badge badge--soft">Modelo</span>
+              </div>
+              <svg id="chartComparativo" viewBox="0 0 720 240" preserveAspectRatio="none"></svg>
+            </article>
+
+            <article class="panel panel--wide">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Ritmo do bot</p>
+                  <h3>Lucro por ciclo (com data)</h3>
+                </div>
+                <span class="badge badge--soft">Historico recente</span>
+              </div>
+              <svg id="chartLucroCiclos" viewBox="0 0 720 240" preserveAspectRatio="none"></svg>
+            </article>
+          </div>
+
+          <div class="grid grid--detail">
+
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Radar</p>
+                  <h3>Oportunidades por par</h3>
+                </div>
+                <span id="dashScannerStatus" class="badge badge--soft">--</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Par</th>
+                      <th>Sinal</th>
+                      <th>Lucro esp.</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tabelaOportunidades"></tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="tab-bot" class="tab-view">
+          <div class="grid grid--bot">
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Controle</p>
+                  <h3>Ligar e desligar o bot</h3>
+                </div>
+                <span id="botStatus" class="badge badge--neutral">Pausado</span>
+              </div>
+              <div class="action-row">
+                <button id="botToggleBtn" class="btn btn--primary" type="button">Ligar bot</button>
+              </div>
+              <p id="botCapitalStatus" class="muted">O bot usa somente o capital definido em cada estrategia ativa.</p>
+              <div id="botResumo" class="metric-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Perfis</p>
+                  <h3>Capitais por estrategia</h3>
+                </div>
+                <span id="botPerfisStatus" class="badge badge--soft">Customizavel</span>
+              </div>
+              <div id="botPerfis" class="profile-grid"></div>
+              <div class="action-row action-row--between">
+                <span class="muted">Escolha quais perfis ficam ativos e quanto cada um pode usar.</span>
+                <button id="botPerfisSalvar" class="btn btn--secondary" type="button">Aplicar perfis</button>
+              </div>
+            </article>
+          </div>
+
+          <div class="grid grid--detail">
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Ciclo</p>
+                  <h3>Leitura operacional do bot</h3>
+                </div>
+                <span id="botCicloStatus" class="badge badge--soft">--</span>
+              </div>
+              <div id="botCicloResumo" class="metric-list"></div>
+            </article>
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Perfis isolados</p>
+                  <h3>Historico individual por estrategia</h3>
+                </div>
+                <span class="badge badge--soft">Mini | Ganancioso | Diario</span>
+              </div>
+              <div id="botHistoricoPerfisDetalhe" class="strategy-history-grid"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="tab-noticias" class="tab-view">
+          <article class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Noticias multiativo</p>
+                <h3>Radar operacional por simbolo</h3>
+              </div>
+              <span id="newsAtualizacao" class="badge badge--soft">Aguardando</span>
+            </div>
+            <div id="newsTabs" class="symbol-tabs"></div>
+            <div id="newsResumo" class="metric-list"></div>
+          </article>
+
+          <div class="grid grid--news-main">
+            <article class="panel">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Headlines</p>
+                  <h3>Noticias recentes</h3>
+                </div>
+                <span id="newsHeadlinesTotal" class="badge badge--soft">0 itens</span>
+              </div>
+              <div id="newsHeadlines" class="headline-list headline-list--compact"></div>
+            </article>
+
+            <article class="panel panel--wide">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Preview</p>
+                  <h3>Fonte selecionada</h3>
+                </div>
+                <span id="newsPreviewStatus" class="badge badge--soft">Sem preview</span>
+              </div>
+              <div id="newsFrames" class="news-preview"></div>
+            </article>
+          </div>
+
+          <article class="panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Confiabilidade</p>
+                <h3>Top fontes por peso e cobertura</h3>
+              </div>
+              <span class="badge badge--soft">Peso por fonte</span>
+            </div>
+            <div id="newsFontesPeso" class="source-list source-list--ranked"></div>
+          </article>
+        </section>
+
+      </main>
+    </section>
+  </div>
+</body>
+</html>

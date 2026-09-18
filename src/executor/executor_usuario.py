@@ -12,6 +12,15 @@ class ExecutorIsoladoUsuario:
         self.gerenciador = GerenciadorOrdens()
 
     async def preparar_execucao(self, aprovacao_risco: dict[str, Any], preco_referencia: float) -> dict[str, Any]:
+        # Ajuste de latência: se performance_mode ativo, timeout mais agressivo e slippage reduzido
+        risk_cfg = aprovacao_risco.get("risk_config_aplicado", {})
+        is_perf = bool(risk_cfg.get("performance_mode", False))
+        self.gerenciador.definir_timeout(2 if is_perf else 12)
+
+        slippage = float(risk_cfg.get("slippage_pct", 0.0005) or 0.0005)
+        if is_perf:
+            slippage *= 0.5 # Expectativa de execução mais rápida/precisa no modo performance
+
         quantidade = max(aprovacao_risco["notional_sugerido"] / max(preco_referencia, 1e-9), 0.0)
         gatilho_offset = env_float("SIGNAL_TRIGGER_OFFSET_PCT", 0.001, minimo=0.0)
         lado = aprovacao_risco["acao"]
@@ -21,6 +30,7 @@ class ExecutorIsoladoUsuario:
             lado=lado,
             quantidade=quantidade,
             preco=preco_referencia,
+            slippage=slippage,
             preco_gatilho=preco_gatilho,
             executar_apos_ts=int(janela_decisao.get("executar_apos_ts", 0) or 0),
             janela_decisao_minutos=int(janela_decisao.get("janela_minutos", 0) or 0),

@@ -47,6 +47,12 @@ def validar_config() -> list[str]:
     except (TypeError, ValueError):
         erros.append(f"CIRCUIT_BREAKER_DRAWDOWN_PCT nao e numero valido: {bruto!r}")
 
+    # Hardening de produção (CRIT-SEC-05): sob AMBIENTE=producao, o cookie de sessão DEVE
+    # trafegar só por HTTPS (COOKIE_SECURE=true) — senão o token vaza em texto claro.
+    if (os.getenv("AMBIENTE", "") or "").strip().lower() in {"producao", "production", "prod"}:
+        if not env_bool("COOKIE_SECURE", False):
+            erros.append("CRITICO: AMBIENTE=producao exige COOKIE_SECURE=true")
+
     return erros
 
 

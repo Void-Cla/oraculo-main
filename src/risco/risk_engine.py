@@ -25,7 +25,10 @@ def config_risco_padrao() -> dict[str, Any]:
         "lucro_liquido_minimo": 0.0005,
         "lucro_liquido_minimo_usdt": 0.01,
         "filtro_ev_minimo_usdt": 0.01,
-        "binance_taxa_maker_pct": 0.1,
+        # Maker real da Binance Spot com desconto padrão é 0.075% — usar 0.1% (taxa taker)
+        # como default de maker superestima o custo em 33% e rejeita trades marginalmente
+        # lucrativos que na realidade passariam (round-trip inflado de ~0.2% p/ ~0.23%).
+        "binance_taxa_maker_pct": 0.075,
         "binance_taxa_taker_pct": 0.1,
         "slippage_pct": 0.0005,
         "paper_trading": True,
@@ -87,7 +90,7 @@ def _avaliar_ev_liquido_usdt(
             perda_bruta_usdt=perda_bruta,
             valor_ordem_usdt=max(0.0, float(notional_sugerido)),
             ev_minimo_usdt=ev_minimo_liquido_usdt(risk_cfg),
-            taxa_maker_pct=float(risk_cfg.get("binance_taxa_maker_pct", 0.1) or 0.0),
+            taxa_maker_pct=float(risk_cfg.get("binance_taxa_maker_pct", 0.075) or 0.0),
             taxa_taker_pct=float(risk_cfg.get("binance_taxa_taker_pct", 0.1) or 0.0),
             slippage_pct=float(risk_cfg.get("slippage_pct", 0.0005) or 0.0),
         )
@@ -120,8 +123,18 @@ def avaliar_sinal_para_usuario(
     ultima_acao = str(estado_execucao.get("ultima_acao", "") or "").upper()
     sinal_ts = int(sinal.get("ts", 0) or 0)
     lucro_liquido_esperado = float(sinal.get("lucro_liquido_esperado_pct", 0.0) or 0.0)
-    cooldown_minutos = int(risk_cfg.get("cooldown_minutos", 1) or 1)
-    cooldown_ms = max(0, cooldown_minutos) * 60 * 1000
+    # Ajuste dinâmico de Cooldown para modo performance
+    is_performance_mode = bool(risk_cfg.get("performance_mode", False))
+
+    cooldown_segundos_cfg = risk_cfg.get("cooldown_segundos")
+    if cooldown_segundos_cfg is not None:
+        cooldown_ms = max(0, int(cooldown_segundos_cfg or 0)) * 1000
+    elif is_performance_mode:
+        # Modo performance: cooldown reduzido para 10 segundos
+        cooldown_ms = 10 * 1000
+    else:
+        cooldown_minutos = int(risk_cfg.get("cooldown_minutos", 1) or 1)
+        cooldown_ms = max(0, cooldown_minutos) * 60 * 1000
 
     motivos: list[str] = []
     aprovado = sinal.get("acao") != "HOLD"
@@ -170,13 +183,21 @@ def avaliar_sinal_para_usuario(
         aprovado = False
         motivos.append("flip_flop_bloqueado")
 
-    lucro_minimo_pct = float(risk_cfg.get("lucro_liquido_minimo", 0.0005) or 0.0)
+    is_performance_mode = bool(risk_cfg.get("performance_mode", False))
+
+    lucro_minimo_pct = float(risk_cfg.get("lucro_liquido_minimo", 0.0001 if is_performance_mode else 0.0005) or 0.0)
     if lucro_liquido_esperado < lucro_minimo_pct:
         aprovado = False
         motivos.append("lucro_liquido_abaixo_do_minimo")
 
     stop_loss_pct = max(float(sinal.get("stop_loss_pct", 0.0) or 0.0), 0.001)
     confianca = _clamp(float(sinal.get("confianca", 0.0) or 0.0), 0.0, 0.99)
+
+    # Sizing dinâmico baseado em volatilidade
+    features = sinal.get("features", {})
+    volatilidade = float(features.get("volatilidade_pct", 0.02) or 0.02)
+    fator_vol = _clamp(1.0 - (volatilidade / 0.1), 0.5, 1.0) # Se vol > 10%, reduz posição
+
     capital_risco = min(
         saldo_total * float(risk_cfg["risk_per_trade"]),
         float(risk_cfg.get("max_loss_trade_usdt", 0.20) or 0.20),
@@ -185,7 +206,7 @@ def avaliar_sinal_para_usuario(
     exposicao_restante = max(0.0, float(risk_cfg["max_exposicao_ativo"]) - exposicao_ativo)
     notional_limite = saldo_total * exposicao_restante
     notional_sugerido = min(notional_por_stop, notional_limite, saldo_livre)
-    notional_sugerido *= max(0.35, confianca)
+    notional_sugerido *= max(0.35, confianca) * fator_vol
     fracao_capital = (notional_sugerido / saldo_total) if saldo_total > 0 else 0.0
     lucro_liquido_esperado_usdt = notional_sugerido * lucro_liquido_esperado
 
@@ -193,7 +214,7 @@ def avaliar_sinal_para_usuario(
         aprovado = False
         motivos.append("fracao_calculada_invalida")
 
-    lucro_minimo_usdt = float(risk_cfg.get("lucro_liquido_minimo_usdt", 0.01) or 0.01)
+    lucro_minimo_usdt = float(risk_cfg.get("lucro_liquido_minimo_usdt", 0.005 if is_performance_mode else 0.01) or 0.01)
     if lucro_liquido_esperado_usdt < lucro_minimo_usdt:
         aprovado = False
         motivos.append("lucro_liquido_usdt_abaixo_do_minimo")

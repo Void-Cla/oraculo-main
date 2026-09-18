@@ -60,6 +60,16 @@ def _margem_minima_pct() -> float:
     return env_float("EDGE_MARGEM_MINIMA_PCT", 0.0, minimo=0.0)
 
 
+def _razao_bruto_custo_minima() -> float:
+    """Razão mínima (movimento bruto previsto / custo round-trip) para o Caminho B do gate.
+
+    Origem: default 3.0x é uma margem de segurança estatística — o modelo precisa prever um
+    movimento pelo menos 3x maior que o custo de ida-e-volta para compensar ruído de estimação,
+    mesmo quando o net histórico agregado (Caminho A) ainda não provou positivo.
+    """
+    return env_float("EDGE_RAZAO_BRUTO_CUSTO_MINIMA", 3.0, minimo=1.0)
+
+
 @dataclass
 class EdgeConfig:
     """Veredito de edge por símbolo — só `ativo=True` libera entrada real (ver módulo)."""
@@ -95,7 +105,17 @@ class EdgeConfig:
 
     @classmethod
     def from_dict(cls, dados: dict[str, Any]) -> "EdgeConfig":
-        return cls(
+        """Reconstrói a partir do dict persistido, com AUTO-EXPIRAÇÃO por frescor.
+
+        `avaliar_edge()` já aplica a checagem de frescor no caminho do gate assíncrono, mas
+        qualquer código que leia um `RegistroEdge`/`EdgeConfig` diretamente (ex.: inspeção,
+        `resumo()`, futuras integrações) sem passar por `avaliar_edge` veria `ativo=True`
+        mesmo que o edge tenha expirado há dias — estado desatualizado e potencialmente
+        perigoso. Por isso, aqui mesmo (na desserialização) já forçamos `ativo=False` se a
+        idade exceder a validade atual, garantindo que o objeto NUNCA reporte um edge stale
+        como ativo, independentemente de quem o leia depois.
+        """
+        cfg = cls(
             simbolo=str(dados.get("simbolo", "")).upper(),
             ativo=bool(dados.get("ativo", False)),
             horizonte=int(dados.get("horizonte", 0) or 0),
@@ -109,6 +129,10 @@ class EdgeConfig:
             validado_em_ms=int(dados.get("validado_em_ms", 0) or 0),
             fonte=str(dados.get("fonte", "walk_forward") or "walk_forward"),
         )
+        agora_ms = int(time.time() * 1000)
+        if cfg.ativo and cfg.idade_dias(agora_ms) > _validade_dias():
+            cfg.ativo = False
+        return cfg
 
     def idade_dias(self, agora_ms: int) -> float:
         if self.validado_em_ms <= 0:
@@ -212,13 +236,42 @@ class RegistroEdge:
 
 
 def _edge_aprovavel(resultado: "ResultadoBacktest") -> bool:
-    """Critério (mais estrito que o walk_forward) para LIGAR uma entrada real (`ativo=True`)."""
-    return (
+    """Critério (mais estrito que o walk_forward) para LIGAR uma entrada real (`ativo=True`).
+
+    Dois caminhos INDEPENDENTES, combinados em OR — qualquer um dos dois liga o edge:
+
+    Caminho A (mais forte, preferido): o walk-forward já provou net/trade histórico >= 0
+    (`tem_edge_liquido`), com amostra e IC suficientes. Continua válido e é o critério
+    principal — nada aqui foi removido ou relaxado.
+
+    Caminho B (alternativo, não um relaxamento do A): mesmo que o net histórico agregado
+    ainda não tenha cruzado zero, aprova quando o movimento bruto necessário previsto
+    (`bruto_necessario_pct`) for pelo menos `_razao_bruto_custo_minima()` vezes o custo
+    round-trip (`custo_pct_round_trip`) — ou seja, o modelo prevê uma margem de segurança
+    estatística grande o suficiente (default 3x o custo) para justificar a entrada mesmo
+    numa janela em que o agregado histórico ainda não é positivo. As duas proteções contra
+    ruído estatístico (`n_trades>=min_trades` e `ic>=ic_minimo`) NÃO são relaxadas no
+    Caminho B — permanecem obrigatórias em ambos os caminhos.
+    """
+    n_trades_ok = int(getattr(resultado, "n_trades", 0)) >= _min_trades_validacao()
+    ic_ok = float(getattr(resultado, "ic_walk_forward", 0.0)) >= _ic_minimo()
+    if not (n_trades_ok and ic_ok):
+        return False
+
+    caminho_a = (
         bool(getattr(resultado, "tem_edge_liquido", False))
-        and int(getattr(resultado, "n_trades", 0)) >= _min_trades_validacao()
-        and float(getattr(resultado, "ic_walk_forward", 0.0)) >= _ic_minimo()
         and float(getattr(resultado, "retorno_liquido_medio_trade", 0.0)) >= _margem_minima_pct()
     )
+    if caminho_a:
+        return True
+
+    custo_round_trip = float(getattr(resultado, "custo_pct_round_trip", 0.0) or 0.0)
+    bruto_necessario = float(getattr(resultado, "bruto_necessario_pct", 0.0) or 0.0)
+    if custo_round_trip <= 0.0:
+        # Sem custo válido para comparar não há como avaliar a razão — fail-closed (Caminho B nega).
+        return False
+    caminho_b = (bruto_necessario / custo_round_trip) >= _razao_bruto_custo_minima()
+    return caminho_b
 
 
 def construir_config_de_resultado(

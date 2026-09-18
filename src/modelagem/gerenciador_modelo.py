@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.linear_model import SGDRegressor
 from sklearn.preprocessing import StandardScaler
 
+from src.core.integridade_modelo import assinar_artefato, carregar_joblib_verificado
 from src.core.settings import env_float, env_int, model_dir
 
 FEATURE_ORDER = [
@@ -75,7 +76,9 @@ class GerenciadorModelo:
 
     def _carregar(self) -> None:
         if self._modelo_path.exists():
-            dados = joblib.load(self._modelo_path)
+            # CRIT-SEC-01: verifica integridade (HMAC) antes do unpickle quando MODELO_HMAC_KEY
+            # está configurada; sem chave, carrega normalmente (comportamento legado).
+            dados = carregar_joblib_verificado(self._modelo_path)
             self._modelo = dados.get("modelo", self._modelo)
             self._scaler = dados.get("scaler", self._scaler)
             self._amostras_ajustadas = int(dados.get("amostras_ajustadas", 0))
@@ -86,7 +89,7 @@ class GerenciadorModelo:
         caminho = self._resolver_modelo_batch()
         if caminho is None:
             return
-        dados = joblib.load(caminho)
+        dados = carregar_joblib_verificado(caminho)
         self._modelo_batch = dados.get("modelo")
         self._feature_cols_batch = list(dados.get("feature_cols") or FEATURE_ORDER)
         self._versao_batch = str(dados.get("versao", caminho.stem))
@@ -134,9 +137,8 @@ class GerenciadorModelo:
         return close * (1.0 + variacao)
 
     def _predicao_online(self, features: dict[str, Any]) -> float | None:
-        # Gate de confiabilidade: um modelo sub-treinado (poucas amostras) com SGD pode
-        # divergir e cravar predições extremas, dominando o sinal. Só usa o online após
-        # um aquecimento mínimo (MIN_AMOSTRAS_ONLINE). Abaixo disso, vale o fallback são.
+        """Produz candidato para avaliação em sombra; nunca para a saída servida."""
+        # O limiar evita registrar como candidato um SGD ainda sem aquecimento.
         min_amostras = env_int("MIN_AMOSTRAS_ONLINE", 200, minimo=1)
         if not self._esta_ajustado() or self._amostras_ajustadas < min_amostras:
             return None
@@ -164,18 +166,17 @@ class GerenciadorModelo:
             return None
 
     def predict(self, features: dict[str, Any]) -> float:
+        """Retorna somente predições já promovidas e estáveis.
+
+        O SGD incremental é treinado para avaliação em sombra. Ele não compõe
+        a saída servida até uma promoção explícita, versionada e aprovada.
+        """
         predicao_heuristica = self._predicao_fallback(features)
         predicoes: list[tuple[float, float]] = [(predicao_heuristica, 0.25)]
 
         predicao_batch = self._predicao_batch(features)
         if predicao_batch is not None:
             predicoes.append((predicao_batch, 0.35))
-
-        predicao_online = self._predicao_online(features)
-        if predicao_online is not None:
-            peso_online_base = env_float("PESO_MODELO_ONLINE", 0.40, minimo=0.10)
-            fator_online = min(1.0, max(0.25, self._amostras_ajustadas / 50.0))
-            predicoes.append((predicao_online, peso_online_base * fator_online))
 
         soma_pesos = sum(peso for _, peso in predicoes) or 1.0
         predicao_final = sum(predicao * peso for predicao, peso in predicoes) / soma_pesos
@@ -200,6 +201,9 @@ class GerenciadorModelo:
             },
             self._modelo_path,
         )
+        # CRIT-SEC-01: assina o artefato (no-op se MODELO_HMAC_KEY ausente) para que o
+        # próximo _carregar verifique a integridade antes do unpickle.
+        assinar_artefato(self._modelo_path)
         with self._meta_path.open("w", encoding="utf-8") as arquivo:
             json.dump(self.status(), arquivo, ensure_ascii=False, indent=2)
 
@@ -232,16 +236,16 @@ class GerenciadorModelo:
             # Saúde do treino online em runtime (observabilidade):
             "min_amostras_online": min_amostras,
             "gate_amostras_ok": self._amostras_ajustadas >= min_amostras,
-            "online_em_uso": self._esta_ajustado() and self._amostras_ajustadas >= min_amostras,
+            "online_em_uso": False,
+            "online_em_sombra": self._esta_ajustado(),
             "coef_norm": self._coef_norm(),
             "max_variacao_prevista": env_float("MAX_VARIACAO_PREVISTA", 0.02, minimo=0.001),
         }
 
 
 # ── Cache de instâncias por símbolo (PERF-01) ───────────────────────────────
-# Evita o joblib.load() a cada ciclo de predição. A invalidação é por assinatura de
-# disco (mtime do modelo online + mtime do diretório): quando o treinador salva um novo
-# modelo, a assinatura muda e o preditor recarrega — o aprendizado online não é perdido.
+# Evita joblib.load repetido. A assinatura inclui o candidato online para que seus
+# metadados de sombra permaneçam observáveis, embora ele não componha a saída servida.
 _CACHE_GERENCIADORES: dict[str, tuple[tuple[float, float], "GerenciadorModelo"]] = {}
 
 

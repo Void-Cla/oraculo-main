@@ -18,7 +18,10 @@ def gerar_sinal_momentum(simbolo: str, features: dict[str, Any], contexto: dict[
     elif ema5 < ema10:
         score -= 0.45
     score += clamp(r_3m * 12.0, -0.35, 0.35)
-    score += clamp((slope_ma / max(abs(float(features.get("close", 1.0) or 1.0)), 1.0)) * 20.0, -0.2, 0.2)
+    # slope_ma já vem normalizado pelo preço (adimensional) do gerador_features — dividir
+    # por `close` de novo aqui seria dupla normalização (contribuição ~preço× menor que o
+    # pretendido). Usar slope_ma diretamente na mesma escala de r_3m.
+    score += clamp(slope_ma * 20.0, -0.2, 0.2)
 
     acao = "HOLD"
     if score >= 0.20:

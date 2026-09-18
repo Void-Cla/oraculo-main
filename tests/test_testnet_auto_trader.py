@@ -1,4 +1,17 @@
+import asyncio
+
 import pytest
+
+# `gerar_sinal_orquestrado` é async desde 2026-07-01 (voto direcional de peso igual da IA,
+# ver src/sinais/signal_engine.py). Os testes abaixo mockam esse ponto com funções síncronas
+# (lambdas) — este helper preserva a mesma sintaxe compacta (`_stub_sinal(lambda **kw: {...})`)
+# envolvendo o resultado sync numa coroutine, sem reescrever cada teste individualmente.
+def _stub_sinal(fn_sincrona):
+    async def _wrapper(**kwargs):
+        return fn_sincrona(**kwargs)
+
+    return _wrapper
+
 
 from src.servicos.testnet_auto_trader import (
     TestnetAutoTrader as TraderAutoTestnet,
@@ -166,6 +179,47 @@ def test_saida_ciclo_corta_perda_por_padrao(monkeypatch):
     assert resultado["motivo"] == "stop_protecao_acionado"
 
 
+def test_saida_ciclo_considera_perda_liquida_no_stop(monkeypatch):
+    monkeypatch.delenv("AUTO_SEGURAR_NO_PREJUIZO", raising=False)
+    state = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 100})
+    state.update(
+        {
+            "ciclo_ativo": True,
+            "ciclo_quantidade": 0.01,
+            "ciclo_preco_entrada": 10000.0,
+            "ciclo_notional_entrada": 100.0,
+            "ciclo_iniciado_ts": 1,
+            "ciclo_preco_pico": 10000.0,
+        }
+    )
+    sinal = SignalDecision.from_mapping(
+        {
+            "simbolo": "BTCUSDT",
+            "acao": "HOLD",
+            "ts": 2,
+            "confianca": 0.7,
+            "stop_loss_pct": 0.003,
+            "take_profit_pct": 0.01,
+            "lucro_liquido_esperado_pct": 0.0,
+            "features": {"close": 9980.0, "spread_rel": 0.0},
+        }
+    )
+
+    resultado = _avaliar_saida_ciclo(
+        state=state,
+        sinal=sinal,
+        ajustes_sinal={"signal_trade_fee_pct": 0.0012, "signal_slippage_pct": 0.0005},
+        saldo_base=0.01,
+        preco_atual=9980.0,
+        perfil={"stop_protecao_pct": 0.003},
+    )
+
+    assert state["ciclo_retorno_aberto_pct"] < 0.0
+    assert state["ciclo_retorno_liquido_aberto_pct"] <= -0.003
+    assert resultado["vender"] is True
+    assert resultado["motivo"] == "stop_protecao_acionado"
+
+
 def test_saida_ciclo_segura_no_prejuizo_apenas_com_opt_in(monkeypatch):
     # Comportamento antigo (segurar perdedor) só com opt-in explícito e desaconselhado.
     monkeypatch.setenv("AUTO_SEGURAR_NO_PREJUIZO", "true")
@@ -232,9 +286,14 @@ def test_usuario_virtual_preserva_freios_e_calibra_pisos_testnet():
     )
     risco = usuario["risk_config"]
 
-    assert risco["max_trades_abertos"] == 1
-    assert risco["max_trades_por_hora"] == 3
-    assert risco["cooldown_minutos"] == 10
+    # max_trades_abertos=3 está dentro do teto defensivo [1, 5] → preservado (bug de
+    # posição-fantasma corrigido: antes o valor do caller era sempre colapsado para 1).
+    assert risco["max_trades_abertos"] == 3
+    # DA-32: em TESTNET a cadência é solta (validação precisa de volume; dinheiro fake):
+    # caller pediu 30/h → teto 12; cooldown 1min → piso 3min. CONTA REAL mantém 3/h e ≥10min
+    # (coberto por test_usuario_virtual_conta_real_mantem_3_trades_hora_cooldown_10min).
+    assert risco["max_trades_por_hora"] == 12
+    assert risco["cooldown_segundos"] == 45
     assert risco["bloquear_flip_flop"] is True
     assert risco["max_exposicao_ativo"] == 0.20
     assert risco["risk_per_trade"] == 0.005
@@ -304,6 +363,50 @@ async def test_fechamento_ciclo_aciona_bloqueio_persistente_por_perda_diaria(mon
     assert state["ultimo_motivo"] == "limite_perda_diaria_atingido"
     assert ("retomada_operacoes_bloqueadas", True) in gravados
     assert ("retomada_modo", "pausado") in gravados
+
+
+@pytest.mark.asyncio
+async def test_loop_persiste_halt_por_limite_de_erros_consecutivos(monkeypatch):
+    trader = TraderAutoTestnet()
+    token = "halt-erros"
+    trader._state[token] = _novo_estado(
+        {"simbolo": "BTCUSDT", "notional_usdt": 100.0, "consecutive_errors_limit": 1}
+    )
+    gravados = []
+
+    class _ClienteFalso:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def fechar(self):
+            return None
+
+    async def _executar_ciclo(*args, **kwargs):
+        raise RuntimeError("falha_controlada")
+
+    async def _registrar_evento(*args, **kwargs):
+        return None
+
+    async def _definir(chave, valor):
+        gravados.append((chave, valor))
+
+    async def _cancelar_apos_ciclo(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.ClienteBinance", _ClienteFalso)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.GerenciadorOrdens", _ClienteFalso)
+    monkeypatch.setattr(trader, "_executar_ciclo", _executar_ciclo)
+    monkeypatch.setattr(trader, "_registrar_evento", _registrar_evento)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioConfig.definir", _definir)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.asyncio.sleep", _cancelar_apos_ciclo)
+
+    with pytest.raises(asyncio.CancelledError):
+        await trader._loop(token, {"api_key": "chave", "api_secret": "segredo", "modo_testnet": True})
+
+    assert trader._state[token]["circuit_tripped"] is True
+    assert ("retomada_operacoes_bloqueadas", True) in gravados
+    assert ("retomada_modo", "pausado") in gravados
+    assert ("bloqueio_operacional_motivo", "limite_erros_consecutivos_atingido") in gravados
 
 
 def _monitoramento_multiativo_falso(
@@ -466,7 +569,7 @@ async def test_auto_trader_respeita_hold_sem_executar(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 1,
@@ -476,7 +579,7 @@ async def test_auto_trader_respeita_hold_sem_executar(monkeypatch):
             "lucro_liquido_esperado_pct": 0.01,
             "features": {"close": 50000.0},
             "motivo": "modelo_em_hold",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -514,6 +617,89 @@ async def test_auto_trader_respeita_hold_sem_executar(monkeypatch):
     assert ger.ordens == []
     assert trader._state[token]["ultimo_sinal"] == "HOLD"
     assert trader._state[token]["ultima_acao"] == "HOLD"
+
+
+async def test_auto_trader_repassa_analista_ia_injetado_para_gerar_sinal(monkeypatch):
+    """`definir_analista_ia` (wiring do voto direcional de peso igual, Parte C) deve resultar
+    no analista injetado sendo repassado como `analista_ia=` na chamada a
+    `gerar_sinal_orquestrado` dentro de `_executar_ciclo` — prova que o autotrader não ignora
+    a instância configurada em `main.py` (lifespan)."""
+    trader = TraderAutoTestnet()
+    token = "com_analista_ia"
+    trader._state[token] = _novo_estado({"simbolo": "BTCUSDT", "intervalo_segundos": 5, "notional_usdt": 25})
+
+    analista_sentinela = object()
+    trader.definir_analista_ia(analista_sentinela)
+    capturado = {}
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _klines(*args, **kwargs):
+        return [{"ts": 1, "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 100}]
+
+    async def _livro(*args, **kwargs):
+        return {"bid_price": 10.4, "ask_price": 10.6, "bid_qty": 1.0, "ask_qty": 1.0}
+
+    async def _ajustes(*args, **kwargs):
+        return {"aplicado": {}}
+
+    async def _gerar_sinal_capturando(**kwargs):
+        capturado["analista_ia"] = kwargs.get("analista_ia")
+        return {
+            "simbolo": "BTCUSDT",
+            "acao": "HOLD",
+            "ts": 1,
+            "confianca": 0.8,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.02,
+            "lucro_liquido_esperado_pct": 0.01,
+            "features": {"close": 50000.0},
+            "motivo": "modelo_em_hold",
+        }
+
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.coletar_e_persistir", _noop)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioOhlcv.obter_ultimas", _klines)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioLivroTopo.obter_ultimo", _livro)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_noticias_para_peso", lambda simbolo="BTCUSDT": _ajustes())
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_sinal", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_risco", _ajustes)
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.gerar_sinal_orquestrado", _gerar_sinal_capturando)
+    monkeypatch.setattr(
+        "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
+        lambda **kwargs: {
+            "usuario_id": 0,
+            "usuario_nome": "auto",
+            "simbolo": "BTCUSDT",
+            "acao": "HOLD",
+            "aprovado": False,
+            "motivos": ["sinal_hold"],
+            "fracao_capital": 0.0,
+            "notional_sugerido": 0.0,
+            "stop_loss_pct": 0.01,
+            "take_profit_pct": 0.02,
+            "lucro_liquido_esperado_pct": 0.01,
+            "lucro_liquido_esperado_usdt": 0.0,
+            "confirmacao_multi_timeframe": {},
+            "probabilidade_trade": {},
+            "janela_decisao": {},
+            "paper_trading": False,
+            "risk_config_aplicado": {},
+        },
+    )
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioAuditoria.registrar", _noop)
+
+    ger = _GerenciadorOrdensFalso()
+    await trader._executar_ciclo(
+        token=token,
+        sessao={"modo_testnet": True},
+        cliente_conta=_ClienteContaFalso(),
+        cliente_mercado=_ClienteMercadoFalso(),
+        ger=ger,
+    )
+
+    assert capturado["analista_ia"] is analista_sentinela
 
 
 @pytest.mark.asyncio
@@ -978,7 +1164,7 @@ async def test_auto_trader_compra_so_quando_pipeline_aprova(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "BUY",
             "ts": 1,
@@ -988,7 +1174,7 @@ async def test_auto_trader_compra_so_quando_pipeline_aprova(monkeypatch):
             "lucro_liquido_esperado_pct": 0.02,
             "features": {"close": 50000.0},
             "motivo": "compra_orquestrada",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1148,7 +1334,7 @@ async def test_auto_trader_nao_alterna_para_sell_sem_sinal(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_sinal", _ajustes)
     monkeypatch.setattr("src.servicos.testnet_auto_trader.obter_ajustes_risco", _ajustes)
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
-    monkeypatch.setattr("src.servicos.testnet_auto_trader.gerar_sinal_orquestrado", lambda **kwargs: sinais.pop(0))
+    monkeypatch.setattr("src.servicos.testnet_auto_trader.gerar_sinal_orquestrado", _stub_sinal(lambda **kwargs: sinais.pop(0)))
     monkeypatch.setattr("src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario", lambda **kwargs: aprovacoes.pop(0))
     monkeypatch.setattr("src.servicos.testnet_auto_trader.ExecutorIsoladoUsuario.preparar_execucao", _preparar_execucao)
     monkeypatch.setattr("src.servicos.testnet_auto_trader.RepositorioAuditoria.registrar", _noop)
@@ -1239,7 +1425,7 @@ async def test_auto_trader_nao_abre_nova_compra_com_ciclo_ativo(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "BUY",
             "ts": 1,
@@ -1249,7 +1435,7 @@ async def test_auto_trader_nao_abre_nova_compra_com_ciclo_ativo(monkeypatch):
             "lucro_liquido_esperado_pct": 0.02,
             "features": {"close": 50000.0},
             "motivo": "compra_forte",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1344,7 +1530,7 @@ async def test_auto_trader_reconcilia_saldo_legado_antes_de_abrir_nova_compra(mo
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "BUY",
             "ts": 1,
@@ -1354,7 +1540,7 @@ async def test_auto_trader_reconcilia_saldo_legado_antes_de_abrir_nova_compra(mo
             "lucro_liquido_esperado_pct": 0.02,
             "features": {"close": 50000.0},
             "motivo": "entrada_micro_trader",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1460,7 +1646,7 @@ async def test_auto_trader_libera_saida_de_ciclo_mesmo_com_risco_bloqueando(monk
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "SELL",
             "ts": 1,
@@ -1470,7 +1656,7 @@ async def test_auto_trader_libera_saida_de_ciclo_mesmo_com_risco_bloqueando(monk
             "lucro_liquido_esperado_pct": 0.03,
             "features": {"close": 50500.0, "spread_rel": 0.0},
             "motivo": "saida_otimizada",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1552,7 +1738,7 @@ async def test_auto_trader_bloqueia_sell_de_ciclo_sem_lucro_liquido(monkeypatch)
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "SELL",
             "ts": 1,
@@ -1562,7 +1748,7 @@ async def test_auto_trader_bloqueia_sell_de_ciclo_sem_lucro_liquido(monkeypatch)
             "lucro_liquido_esperado_pct": 0.03,
             "features": {"close": 49900.0, "spread_rel": 0.0},
             "motivo": "saida_sugerida_sem_lucro_real",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1668,7 +1854,7 @@ async def test_auto_trader_realiza_lucro_minimo_liquido_com_hold(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 1,
@@ -1678,7 +1864,7 @@ async def test_auto_trader_realiza_lucro_minimo_liquido_com_hold(monkeypatch):
             "lucro_liquido_esperado_pct": -0.0026,
             "features": {"close": 50500.0, "spread_rel": 0.0},
             "motivo": "segurar_nao_compensa",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1841,7 +2027,7 @@ async def test_auto_trader_compra_par_cruzado_com_saldo_da_moeda_de_cotacao(monk
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "ETHBTC",
             "acao": "BUY",
             "ts": 1,
@@ -1851,7 +2037,7 @@ async def test_auto_trader_compra_par_cruzado_com_saldo_da_moeda_de_cotacao(monk
             "lucro_liquido_esperado_pct": 0.004,
             "features": {"close": 0.08, "spread_rel": 0.0002},
             "motivo": "micro_entrada_ethbtc",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -1975,7 +2161,7 @@ async def test_auto_trader_retreina_e_persiste_outcome_ao_fechar_ciclo(monkeypat
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 2,
@@ -1985,7 +2171,7 @@ async def test_auto_trader_retreina_e_persiste_outcome_ao_fechar_ciclo(monkeypat
             "lucro_liquido_esperado_pct": -0.001,
             "features": {"close": 50500.0, "spread_rel": 0.0},
             "motivo": "segurar_nao_compensa",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2070,7 +2256,7 @@ async def test_auto_trader_assume_ciclo_da_carteira_quando_capital_inicial_esta_
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 1,
@@ -2080,7 +2266,7 @@ async def test_auto_trader_assume_ciclo_da_carteira_quando_capital_inicial_esta_
             "lucro_liquido_esperado_pct": 0.0,
             "features": {"close": 50000.0, "spread_rel": 0.0},
             "motivo": "aguardando_saida",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2160,7 +2346,7 @@ async def test_auto_trader_reconcilia_ultima_compra_do_extrato_antes_de_comprar_
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "BUY",
             "ts": 2,
@@ -2170,7 +2356,7 @@ async def test_auto_trader_reconcilia_ultima_compra_do_extrato_antes_de_comprar_
             "lucro_liquido_esperado_pct": 0.004,
             "features": {"close": 50020.0, "spread_rel": 0.0},
             "motivo": "sinal_de_compra_repetido",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2245,7 +2431,7 @@ async def test_auto_trader_flat_apos_ultima_venda_ignora_sinal_de_venda(monkeypa
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "SELL",
             "ts": 2,
@@ -2255,7 +2441,7 @@ async def test_auto_trader_flat_apos_ultima_venda_ignora_sinal_de_venda(monkeypa
             "lucro_liquido_esperado_pct": 0.004,
             "features": {"close": 50000.0, "spread_rel": 0.0},
             "motivo": "sinal_de_venda_sem_posicao",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2331,7 +2517,7 @@ async def test_auto_trader_nao_assume_saldo_legado_na_borda_do_notional(monkeypa
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 1,
@@ -2341,7 +2527,7 @@ async def test_auto_trader_nao_assume_saldo_legado_na_borda_do_notional(monkeypa
             "lucro_liquido_esperado_pct": 0.0,
             "features": {"close": 100.0, "spread_rel": 0.0},
             "motivo": "aguardando_saida",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2413,7 +2599,7 @@ async def test_auto_trader_ignora_residuo_abaixo_de_cinco_dolares(monkeypatch):
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "HOLD",
             "ts": 1,
@@ -2423,7 +2609,7 @@ async def test_auto_trader_ignora_residuo_abaixo_de_cinco_dolares(monkeypatch):
             "lucro_liquido_esperado_pct": 0.0,
             "features": {"close": 100.0},
             "motivo": "sinal_hold",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2529,7 +2715,7 @@ async def test_auto_trader_reutiliza_sinal_final_do_scanner_multiativo(monkeypat
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("nao deveria recalcular o sinal")),
+        _stub_sinal(lambda **kwargs: (_ for _ in ()).throw(AssertionError("nao deveria recalcular o sinal"))),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2663,7 +2849,7 @@ async def test_auto_trader_nao_abre_ciclo_quando_compra_nao_preenche(monkeypatch
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "BUY",
             "ts": 1,
@@ -2673,7 +2859,7 @@ async def test_auto_trader_nao_abre_ciclo_quando_compra_nao_preenche(monkeypatch
             "lucro_liquido_esperado_pct": 0.02,
             "features": {"close": 50000.0},
             "motivo": "compra_orquestrada",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",
@@ -2780,7 +2966,7 @@ async def test_auto_trader_nao_encerra_ciclo_quando_venda_nao_preenche(monkeypat
     monkeypatch.setattr("src.servicos.testnet_auto_trader.montar_monitoramento_multiativo", _monitoramento_multiativo_stub())
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.gerar_sinal_orquestrado",
-        lambda **kwargs: {
+        _stub_sinal(lambda **kwargs: {
             "simbolo": "BTCUSDT",
             "acao": "SELL",
             "ts": 1,
@@ -2790,7 +2976,7 @@ async def test_auto_trader_nao_encerra_ciclo_quando_venda_nao_preenche(monkeypat
             "lucro_liquido_esperado_pct": 0.03,
             "features": {"close": 50500.0, "spread_rel": 0.0},
             "motivo": "saida_otimizada",
-        },
+        }),
     )
     monkeypatch.setattr(
         "src.servicos.testnet_auto_trader.avaliar_sinal_para_usuario",

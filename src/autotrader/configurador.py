@@ -9,6 +9,15 @@ from typing import Any
 
 from src.autotrader.calculos import _piso_lucro_percentual
 
+# Teto defensivo superior para `max_trades_abertos` no usuário virtual do auto-trader.
+# Origem: alinhado ao valor que o autotrader real (`testnet_auto_trader.py`, linha do BUY
+# em `_executar_ciclo`) de fato configura em `ajustes_risco["max_trades_abertos"] = 5`
+# para operar múltiplos símbolos em paralelo. Antes, este módulo forçava sempre 1,
+# anulando silenciosamente essa intenção (posição-fantasma travando símbolos saudáveis).
+# O teto continua existindo — protege contra um caller malformado passar um valor absurdo —
+# mas agora respeita o valor do caller dentro da faixa [1, 5] em vez de sempre reduzir a 1.
+_TETO_MAX_TRADES_ABERTOS_TESTNET: int = 5
+
 
 def _ajustes_microtrading_auto(
     ajustes_sinal: dict[str, Any],
@@ -31,7 +40,10 @@ def _ajustes_microtrading_auto(
         lucro_liquido_minimo_usdt=lucro_minimo_usdt,
     )
     ajustes_auto["auto_lucro_liquido_minimo_usdt"] = lucro_minimo_usdt
-    ajustes_auto["signal_min_net_profit_pct"] = max(0.0002, piso_lucro_pct)
+    # O EV do sinal já é líquido de custos; para prometer pelo menos US$ 0,01 líquido,
+    # o piso percentual precisa acompanhar o notional escolhido pelo usuário.
+    alvo_liquido_pct = 0.01 / notional_base if notional_base > 0.0 else 0.0002
+    ajustes_auto["signal_min_net_profit_pct"] = max(0.0002, piso_lucro_pct, alvo_liquido_pct)
     # Thresholds agressivos para scalping
     ajustes_auto["signal_confirm_threshold"] = max(int(ajustes_auto.get("signal_confirm_threshold", 1) or 1), 1)
     ajustes_auto["signal_decision_window_minutes"] = max(int(ajustes_auto.get("signal_decision_window_minutes", 5) or 5), 1)
@@ -60,27 +72,70 @@ def _ajustes_microtrading_auto(
             ajustes_auto["signal_min_prob"] = max(0.50, float(ajustes_auto["signal_min_prob"]) - 0.008)
             ajustes_auto["signal_min_ev"] = max(0.0001, float(ajustes_auto["signal_min_ev"]) * 0.92)
             ajustes_auto["limiar_score_operacao"] = max(0.13, float(ajustes_auto["limiar_score_operacao"]) - 0.01)
-            ajustes_auto["signal_min_net_profit_pct"] = max(0.0002, float(ajustes_auto["signal_min_net_profit_pct"]) * 0.92)
+            ajustes_auto["signal_min_net_profit_pct"] = max(
+                0.0002, alvo_liquido_pct, float(ajustes_auto["signal_min_net_profit_pct"]) * 0.92
+            )
         elif win_rate <= 0.50 or lucro_medio <= 0.0 or retorno_medio <= 0.0:
             ajustes_auto["signal_min_prob"] = min(0.65, float(ajustes_auto["signal_min_prob"]) + 0.01)
             ajustes_auto["signal_min_ev"] = min(0.001, float(ajustes_auto["signal_min_ev"]) * 1.08)
             ajustes_auto["limiar_score_operacao"] = min(0.25, float(ajustes_auto["limiar_score_operacao"]) + 0.01)
-            ajustes_auto["signal_min_net_profit_pct"] = min(0.002, float(ajustes_auto["signal_min_net_profit_pct"]) * 1.08)
+            ajustes_auto["signal_min_net_profit_pct"] = min(
+                0.002, max(alvo_liquido_pct, float(ajustes_auto["signal_min_net_profit_pct"]) * 1.08)
+            )
     return ajustes_auto
 
 
-def _usuario_virtual(ajustes_risco: dict[str, Any], *, modo_testnet: bool) -> dict[str, Any]:
+def _usuario_virtual(
+    ajustes_risco: dict[str, Any], *, modo_testnet: bool, notional_usdt: float = 0.0
+) -> dict[str, Any]:
     risk_config = dict(ajustes_risco)
     # Freios de segurança do auto-trader — sempre conservadores (defense in depth):
-    # no máximo 1 trade aberto, 3 por hora, cooldown mínimo de 10 min e anti flip-flop.
-    risk_config["max_trades_abertos"] = min(int(risk_config.get("max_trades_abertos", 1) or 1), 1)
-    risk_config["max_trades_por_hora"] = min(int(risk_config.get("max_trades_por_hora", 3) or 3), 3)
-    risk_config["cooldown_minutos"] = max(int(risk_config.get("cooldown_minutos", 10) or 10), 10)
+    # no máximo `_TETO_MAX_TRADES_ABERTOS_TESTNET` trades abertos simultâneos, respeitando o
+    # valor do caller dentro desse teto (não força mais sempre 1) — 3 por hora, cooldown
+    # mínimo de 10 min e anti flip-flop.
+    risk_config["max_trades_abertos"] = min(
+        max(1, int(risk_config.get("max_trades_abertos", 1) or 1)), _TETO_MAX_TRADES_ABERTOS_TESTNET
+    )
+    # FREQUÊNCIA (DA-32): em TESTNET a validação precisa de VOLUME de ciclos — o teto antigo
+    # (3 trades/hora + cooldown 10min) deixava o bot "lerdo" por construção. Testnet: até
+    # 12/h e cooldown ≥45s (anti-spam leve; alinhado ao controlador adaptativo). CONTA REAL
+    # mantém os freios originais (3/h, ≥10min). Gates de QUALIDADE não mudam — só cadência.
+    if modo_testnet:
+        risk_config["max_trades_por_hora"] = min(int(risk_config.get("max_trades_por_hora", 12) or 12), 12)
+        risk_config.pop("cooldown_minutos", None)
+        risk_config["cooldown_segundos"] = max(int(risk_config.get("cooldown_segundos", 45) or 45), 30)
+    else:
+        risk_config["max_trades_por_hora"] = min(int(risk_config.get("max_trades_por_hora", 3) or 3), 3)
+        risk_config.pop("cooldown_segundos", None)
+        risk_config["cooldown_minutos"] = max(int(risk_config.get("cooldown_minutos", 10) or 10), 10)
     risk_config["bloquear_flip_flop"] = True
-    risk_config["max_exposicao_ativo"] = min(max(0.0, float(risk_config.get("max_exposicao_ativo", 0.20) or 0.20)), 0.20)
-    risk_config["risk_per_trade"] = min(max(0.0, float(risk_config.get("risk_per_trade", 0.005) or 0.005)), 0.005)
-    risk_config["max_loss_trade_usdt"] = min(max(0.01, float(risk_config.get("max_loss_trade_usdt", 0.20) or 0.20)), 0.20)
     risk_config["modo_testnet"] = bool(modo_testnet)
+
+    notional_cliente = max(0.0, float(notional_usdt or 0.0))
+    if modo_testnet and notional_cliente > 0.0:
+        # TAMANHO DIRIGIDO PELO FRONTEND (DA-31, correção do dono): o cliente já define o
+        # tamanho pela % da carteira no front (slider "Capital para operar" → notional_usdt).
+        # Esse valor NÃO deve ser anulado por um teto de perda hardcoded de $0.20 no backend
+        # (que fazia o risk_engine dimensionar posições de ~$5 ignorando os $45k escolhidos).
+        # Em TESTNET (dinheiro fake, validação), soltamos os tetos de risco para que o
+        # `notional_por_stop`/`notional_limite` do risk_engine NÃO fiquem abaixo do notional
+        # que o cliente pediu — assim a posição reflete a % escolhida no front. Fórmula: o
+        # risk_engine faz `notional_por_stop = min(saldo*risk_per_trade, max_loss_usdt)/stop`.
+        # Para permitir até `notional_cliente` com um stop típico, `max_loss_usdt` precisa ser
+        # ~ notional_cliente*stop. Usamos um stop de referência conservador (2%) e deixamos
+        # `risk_per_trade`/`max_exposicao_ativo` largos o bastante para não serem o gargalo.
+        _STOP_REFERENCIA = 0.02  # 2% — referência p/ traduzir notional desejado em teto de perda
+        risk_config["max_loss_trade_usdt"] = max(0.01, notional_cliente * _STOP_REFERENCIA)
+        risk_config["risk_per_trade"] = 1.0            # não limita: o teto real vira max_loss_usdt/exposição
+        risk_config["max_exposicao_ativo"] = min(1.0, max(
+            float(risk_config.get("max_exposicao_ativo", 0.0) or 0.0), 0.95
+        ))
+    else:
+        # CONTA REAL (ou testnet sem notional informado): freios conservadores ABSOLUTOS,
+        # inalterados — perda máx $0.20/trade, 0.5% do saldo, 20% de exposição por ativo.
+        risk_config["max_exposicao_ativo"] = min(max(0.0, float(risk_config.get("max_exposicao_ativo", 0.20) or 0.20)), 0.20)
+        risk_config["risk_per_trade"] = min(max(0.0, float(risk_config.get("risk_per_trade", 0.005) or 0.005)), 0.005)
+        risk_config["max_loss_trade_usdt"] = min(max(0.01, float(risk_config.get("max_loss_trade_usdt", 0.20) or 0.20)), 0.20)
     exploracao = bool(risk_config.get("permitir_ev_negativo", False))
     if modo_testnet and exploracao:
         # Modo exploração (TESTNET-ONLY, ver _aplicar_modo_exploracao): pisos permissivos p/ o

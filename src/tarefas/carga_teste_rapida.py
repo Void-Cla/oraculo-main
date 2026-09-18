@@ -85,8 +85,10 @@ async def executar_carga_testes() -> None:
                         "motivo": "forcado_carga_teste",
                     }
                 else:
-                    # For real accounts or when force_always is not set, use normal signal generation
-                    sinal = gerar_sinal_orquestrado(
+                    # For real accounts or when force_always is not set, use normal signal generation.
+                    # `gerar_sinal_orquestrado` é async desde 2026-07-01 (voto direcional de peso
+                    # igual da IA, opt-in — não injetado nesta carga de teste sintética).
+                    sinal = await gerar_sinal_orquestrado(
                         simbolo=simbolo,
                         klines=klines,
                         livro_topo=None,

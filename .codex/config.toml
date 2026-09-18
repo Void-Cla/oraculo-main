@@ -1,0 +1,61 @@
+[agents]
+max_concurrent_threads_per_session = 4
+
+[mcp_servers.filesystem]
+command = "node"
+args = [
+  ".ferramentas/mcp/node-core/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+  ".",
+]
+startup_timeout_sec = 30
+
+[mcp_servers.git]
+command = "uvx"
+args = [
+  "--python",
+  "3.12",
+  "--from",
+  "mcp-server-git",
+  "mcp-server-git",
+  "--repository",
+  ".",
+]
+startup_timeout_sec = 30
+
+[mcp_servers.serena]
+command = "uvx"
+args = [
+  "--python",
+  "3.12",
+  "--from",
+  "git+https://github.com/oraios/serena@1bbe53546124c00e4238972f1599a91fbf8c6539",
+  "serena",
+  "start-mcp-server",
+  "--context",
+  "claude-code",
+  "--project",
+  ".",
+  "--transport",
+  "stdio",
+  "--enable-web-dashboard",
+  "False",
+  "--open-web-dashboard",
+  "False",
+  "--enable-gui-log-window",
+  "False",
+]
+startup_timeout_sec = 60
+
+[mcp_servers.semgrep]
+command = ".ferramentas/mcp/python/.venv/Scripts/python.exe"
+args = [
+  "scripts/mcp/semgrep_local_mcp.py",
+]
+startup_timeout_sec = 45
+
+[mcp_servers.semgrep.env]
+SEMGREP_SEND_METRICS = "off"
+
+[[skills.config]]
+path = ".agents/skills/oraculo-ambiente/SKILL.md"
+enabled = true

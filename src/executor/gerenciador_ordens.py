@@ -8,6 +8,7 @@ from typing import Any
 
 from binance import AsyncClient
 
+from src.core.kill_switch import exigir_desengatado
 from src.core.settings import env_bool, env_int, env_str, env_float
 from src.executor.idempotencia import gerar_client_order_id
 from src.observabilidade.logger import get_logger
@@ -40,6 +41,7 @@ class GerenciadorOrdens:
         self._timeout = env_int("BINANCE_TIMEOUT_SECONDS", 12, minimo=1)
         self._api_key = api_key or env_str("BINANCE_API_KEY")
         self._api_secret = api_secret or env_str("BINANCE_API_SECRET")
+        self._cache_filtros: dict[str, dict[str, float]] = {}
         if testnet is None:
             self._usa_testnet = env_bool("BINANCE_TESTNET", False)
         else:
@@ -51,6 +53,9 @@ class GerenciadorOrdens:
             api_secret = self._api_secret
             self._cliente = await AsyncClient.create(api_key, api_secret, testnet=self._usa_testnet)
         return self._cliente
+
+    def definir_timeout(self, segundos: int):
+        self._timeout = segundos
 
     async def obter_info_simbolo(self, simbolo: str) -> dict[str, Any]:
         cliente = await self._obter_cliente()
@@ -77,6 +82,9 @@ class GerenciadorOrdens:
         return float(quantidade)
 
     async def obter_filtros_simbolo(self, simbolo: str) -> dict[str, float]:
+        if simbolo.upper() in self._cache_filtros:
+            return self._cache_filtros[simbolo.upper()]
+
         info = await self.obter_info_simbolo(simbolo)
         lot = self._extrair_filtro(info, "LOT_SIZE")
         min_notional = self._extrair_filtro(info, "MIN_NOTIONAL")
@@ -87,11 +95,13 @@ class GerenciadorOrdens:
             float(min_notional.get("minNotional", 0.0) or 0.0),
             float(notional.get("minNotional", 0.0) or 0.0),
         )
-        return {
+        filtros = {
             "step_size": step_size,
             "min_qty": min_qty,
             "min_notional": min_notional_val,
         }
+        self._cache_filtros[simbolo.upper()] = filtros
+        return filtros
 
     def simular_ordem(
         self,
@@ -133,6 +143,9 @@ class GerenciadorOrdens:
             raise ValueError("lado invalido")
         if quantidade <= 0.0 or preco <= 0.0:
             raise ValueError("quantidade e preco devem ser positivos")
+        # Kill-switch financeiro (defense in depth): override de qualquer gate — se engatado,
+        # NENHUMA ordem sai. Verificado antes do gate de conta real e do create_order.
+        exigir_desengatado(simbolo=simbolo, lado=lado)
         if not self._usa_testnet and not env_bool("PERMITIR_CONTA_REAL", False):
             raise RuntimeError("conta real bloqueada; habilite PERMITIR_CONTA_REAL=true para prosseguir")
 
@@ -148,6 +161,11 @@ class GerenciadorOrdens:
         q_dec = Decimal(str(quantidade_ajustada)).quantize(Decimal((0, (1,), -decimals)) if decimals > 0 else Decimal(1), rounding=ROUND_DOWN)
         quantidade_str = format(q_dec.normalize(), 'f')
         # Idempotência (PSF-03): toda ordem leva um clientOrderId determinístico da intenção.
+        # NOTA: nenhum caller hoje passa `client_order_id`/`chave_intencao` — o fallback
+        # determinístico (ver `idempotencia.gerar_client_order_id`) trata "este símbolo+lado+
+        # notional" como UMA intenção lógica até os valores mudarem. Se este código vier a
+        # abrir a MESMA posição repetidamente como operações de negócio distintas (não retry),
+        # passe uma `chave_intencao` estável (ex.: ts do sinal) para diferenciar as intenções.
         coid = client_order_id or gerar_client_order_id(
             simbolo=simbolo, lado=lado, notional=quantidade_ajustada * preco
         )
@@ -194,6 +212,8 @@ class GerenciadorOrdens:
         lado = lado.upper()
         if lado not in {"BUY", "SELL"}:
             raise ValueError("lado invalido")
+        # Kill-switch financeiro (defense in depth): override de qualquer gate.
+        exigir_desengatado(simbolo=simbolo, lado=lado)
         if not self._usa_testnet and not env_bool("PERMITIR_CONTA_REAL", False):
             raise RuntimeError("conta real bloqueada; habilite PERMITIR_CONTA_REAL=true para prosseguir")
 
@@ -202,6 +222,8 @@ class GerenciadorOrdens:
             "side": lado,
             "type": "MARKET",
             # Idempotência (PSF-03): clientOrderId determinístico — propaga a payload_try (dict(payload)).
+            # NOTA: nenhum caller hoje passa `client_order_id`/`chave_intencao` — mesma limitação
+            # documentada em `criar_ordem_limit` acima e em `idempotencia.gerar_client_order_id`.
             "newClientOrderId": client_order_id or gerar_client_order_id(
                 simbolo=simbolo, lado=lado, notional=float(quote_order_qty or quantidade or 0.0)
             ),

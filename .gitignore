@@ -7,7 +7,7 @@ log.txt
 .pytest_tmp/
 .tmp_pytest/
 _pytest_work/
-../pytest_work/
+/pytest_work/
 dados/*.sqlite-shm
 dados/*.sqlite-wal
 /dados/oraculo.sqlite
@@ -28,6 +28,11 @@ env/
 # Node
 node_modules/
 frontend/node_modules/
+.ferramentas/mcp/**/node_modules/
+.ferramentas/mcp/python/.venv/
+.ferramentas/mcp/logs/
+.ferramentas/mcp/node/
+.ferramentas/mcp/node-graph/
 
 # Segredos locais (nunca versionar)
 mec.txt

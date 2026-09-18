@@ -30,6 +30,28 @@ def test_client_order_id_respeita_limite_binance_36_chars():
     assert coid.isalnum()  # charset seguro
 
 
+def test_fallback_sem_chave_intencao_e_deterministico_entre_segundos():
+    """Bug corrigido: fallback usava time.time() → mesmo retry 1s depois gerava ID diferente,
+    quebrando idempotência cross-restart. Agora a MESMA intenção lógica sempre gera o MESMO ID,
+    independentemente de quando é chamada (fallback usa base fixa, não relógio de parede) —
+    duas chamadas separadas (mesma intenção, sem `chave_intencao`) têm de bater sempre,
+    mesmo que o segundo do relógio mude entre elas (por isso não dependemos de sleep real)."""
+    chamadas = {
+        gerar_client_order_id(simbolo="BTCUSDT", lado="BUY", notional=12.5) for _ in range(5)
+    }
+    assert len(chamadas) == 1  # sem chave_intencao, sempre o mesmo ID p/ a mesma intenção
+
+
+def test_fallback_sem_chave_intencao_ainda_diferencia_por_intencao():
+    """O fallback determinístico não perde a granularidade de símbolo/lado/notional — só remove
+    o timestamp. Intenções logicamente diferentes continuam gerando IDs diferentes."""
+    a = gerar_client_order_id(simbolo="BTCUSDT", lado="BUY", notional=12.5)
+    b = gerar_client_order_id(simbolo="ETHUSDT", lado="BUY", notional=12.5)
+    c = gerar_client_order_id(simbolo="BTCUSDT", lado="SELL", notional=12.5)
+    d = gerar_client_order_id(simbolo="BTCUSDT", lado="BUY", notional=99.9)
+    assert len({a, b, c, d}) == 4
+
+
 # ── Circuit breaker (PSF-04 / DA-03) ────────────────────────────────────────
 def test_halt_ativa_ao_exceder_drawdown():
     cb = CircuitBreaker(limite_drawdown_pct=5.0, janela_horas=24)
@@ -73,6 +95,51 @@ async def test_halt_persiste_entre_instancias(tmp_path):
     cb2 = CircuitBreaker(limite_drawdown_pct=5.0)
     await cb2.carregar()
     assert cb2.esta_em_halt() is True
+
+
+def test_registrar_resultado_sozinho_nao_persiste_e_marca_flag():
+    """`registrar_resultado` é síncrono e NÃO deve fazer I/O — só marca a flag interna."""
+    cb = CircuitBreaker(limite_drawdown_pct=5.0)
+    assert cb._precisa_persistir is False
+    cb.registrar_resultado(pnl_usdt=-60.0, capital_total=1000.0)
+    assert cb.esta_em_halt() is True
+    assert cb._precisa_persistir is True  # halt ligou em memória, ainda não foi ao disco
+
+
+@pytest.mark.asyncio
+async def test_registrar_resultado_e_persistir_grava_halt_recem_ativado(tmp_path):
+    """Bug corrigido: halt 'fantasma' — ativação em memória tem de ir ao disco na hora."""
+    os.environ["DB_PATH"] = str(tmp_path / "cb_persist.sqlite")
+    from src.persistencia.conexao import inicializar_db
+
+    inicializar_db()
+    cb = CircuitBreaker(limite_drawdown_pct=5.0)
+    em_halt = await cb.registrar_resultado_e_persistir(pnl_usdt=-60.0, capital_total=1000.0)
+    assert em_halt is True
+    assert cb._precisa_persistir is False  # já persistiu, flag resetada
+
+    # Simula crash+restart imediatamente após o halt: nova instância lê do banco.
+    cb2 = CircuitBreaker(limite_drawdown_pct=5.0)
+    await cb2.carregar()
+    assert cb2.esta_em_halt() is True
+
+
+@pytest.mark.asyncio
+async def test_resetar_halt_e_persistir_grava_reset(tmp_path):
+    os.environ["DB_PATH"] = str(tmp_path / "cb_reset.sqlite")
+    from src.persistencia.conexao import inicializar_db
+
+    inicializar_db()
+    cb = CircuitBreaker(limite_drawdown_pct=5.0)
+    await cb.registrar_resultado_e_persistir(pnl_usdt=-100.0, capital_total=1000.0)
+    assert cb.esta_em_halt() is True
+
+    await cb.resetar_halt_e_persistir(autorizado_por="operador_humano")
+    assert cb.esta_em_halt() is False
+
+    cb2 = CircuitBreaker(limite_drawdown_pct=5.0)
+    await cb2.carregar()
+    assert cb2.esta_em_halt() is False
 
 
 # ── Validação fail-fast (PSF-01) ────────────────────────────────────────────

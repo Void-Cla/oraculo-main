@@ -391,6 +391,70 @@ def test_inicia_e_pausa_auto_bot_manualmente(tmp_path, monkeypatch):
         assert len(chamadas_parar) == 1
 
 
+class _ClienteBinanceKwargsOnly:
+    """Espelha a assinatura REAL de `ClienteBinance` (kwargs-only, `*`).
+
+    O fake antigo (`_ClienteBinanceFalso`) aceita args posicionais e por isso NÃO reproduzia
+    o bug de `ClienteBinance(sessao)` no resolve de capital_pct: o TypeError era engolido por
+    um `except` mudo e o bot iniciava sempre com $10, ignorando a % do slider (posições de $5
+    e ciclos de horas em conta de 70k). Este fake falha exatamente como a classe real falharia.
+    """
+
+    ultimo_testnet = None
+
+    def __init__(self, *, api_key=None, api_secret=None, testnet=None):
+        type(self).ultimo_testnet = testnet
+
+    async def obter_conta_raw(self):
+        return {
+            "balances": [
+                {"asset": "BTC", "free": "0.07000000", "locked": "0.00000000"},
+                {"asset": "USDT", "free": "70000.00000000", "locked": "0.00000000"},
+            ]
+        }
+
+    async def fechar(self):
+        return None
+
+
+def test_auto_start_com_capital_pct_usa_pct_do_saldo_livre(tmp_path, monkeypatch):
+    """O Start do front envia só `capital_pct` — o notional configurado no bot tem de ser
+    exatamente saldo_livre_usdt * pct/100, nunca o fallback silencioso de $10."""
+    os.environ["DB_PATH"] = str(tmp_path / "capital_pct.sqlite")
+    monkeypatch.setattr("src.servicos.sessoes.ClienteBinance", _ClienteBinanceFalso)
+    monkeypatch.setattr("src.main.ClienteBinance", _ClienteBinanceKwargsOnly)
+    chamadas_iniciar = []
+
+    def _status_auto_trade(token):
+        return {"ativo": False, "config": {}, "estado_ciclo": None, "ultimo_motivo": None}
+
+    async def _iniciar_auto_trade(token, sessao, config):
+        chamadas_iniciar.append({"token": token, "sessao": sessao, "config": config})
+        return {"ativo": True, "estado_ciclo": "AGUARDANDO_ENTRADA"}
+
+    monkeypatch.setattr("src.main.AUTO_TRADER.status", _status_auto_trade)
+    monkeypatch.setattr("src.main.AUTO_TRADER.iniciar", _iniciar_auto_trade)
+
+    with TestClient(app) as client:
+        login = client.post(
+            "/v1/sessao/entrar",
+            json={"api_key": "abcd1234key", "api_secret": "secret9876", "testnet": True},
+        )
+        assert login.status_code == 200
+
+        iniciar = client.post(
+            "/v1/auto/start",
+            json={"simbolo": "BTCUSDT", "intervalo_segundos": 15, "capital_pct": 20, "lado_inicial": "BUY"},
+        )
+        assert iniciar.status_code == 200
+        # 20% de 70.000 USDT livres = 14.000 — a % do cliente vira o teto REAL de operação.
+        assert iniciar.json()["ajustes"]["aplicado"]["notional_usdt"] == 14000.0
+        assert len(chamadas_iniciar) == 1
+        assert chamadas_iniciar[0]["config"]["notional_usdt"] == 14000.0
+        # A consulta de saldo tem de respeitar o modo da sessão (testnet), não o default.
+        assert _ClienteBinanceKwargsOnly.ultimo_testnet is True
+
+
 def test_config_operacional_protegida_nao_pode_ser_alterada_por_endpoint_generico(tmp_path):
     os.environ["DB_PATH"] = str(tmp_path / "config_protegida.sqlite")
 

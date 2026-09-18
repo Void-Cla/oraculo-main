@@ -1,0 +1,329 @@
+﻿{
+    "versao":  "1.0.0",
+    "projeto":  "oraculo",
+    "arquivo":  ".codex/contex.json",
+    "ultima_atualizacao_utc":  "2026-04-18T11:30:00Z",
+    "objetivo":  "Memoria operacional incremental para reduzir recarga de contexto e economizar tokens.",
+    "regras":  {
+                   "max_entradas":  120,
+                   "max_resumo_chars":  400,
+                   "permitir_segredo":  false,
+                   "campos_obrigatorios":  [
+                                               "ts_utc",
+                                               "autor",
+                                               "ownership",
+                                               "resumo",
+                                               "risco",
+                                               "testes",
+                                               "status"
+                                           ]
+               },
+    "ownership_agentes":  {
+                              "vhub_arquiteto":  [
+                                                     "arquitetura_canonica",
+                                                     "ownership",
+                                                     "contrato_minimo"
+                                                 ],
+                              "oraculo_engenheiro_seguranca":  [
+                                                                   "src/main.py",
+                                                                   "src/contratos/",
+                                                                   "src/core/",
+                                                                   "src/observabilidade/",
+                                                                   "src/servicos/sessoes.py"
+                                                               ],
+                              "oraculo_engenheiro_binance":  [
+                                                                 "src/binance_api/",
+                                                                 "src/executor/gerenciador_ordens.py",
+                                                                 "src/servicos/sessoes.py"
+                                                             ],
+                              "oraculo_engenheiro_dados":  [
+                                                               "src/persistencia/",
+                                                               "migrations/",
+                                                               "src/tarefas/tarefas_previsao.py"
+                                                           ],
+                              "oraculo_engenheiro_interface":  [
+                                                                   "frontend/"
+                                                               ],
+                              "oraculo_engenheiro_modelagem":  [
+                                                                   "src/calculos/",
+                                                                   "src/modelagem/",
+                                                                   "src/calibracao/",
+                                                                   "src/backtester/"
+                                                               ],
+                              "oraculo_analista_sentimento_macro":  [
+                                                                        "src/servicos/noticias.py",
+                                                                        "src/servicos/coletor_noticias.py",
+                                                                        "src/servicos/llm_analista.py"
+                                                                    ],
+                              "oraculo_estrategista_sinais":  [
+                                                                  "src/sinais/",
+                                                                  "src/estrategias/",
+                                                                  "src/meta_strategy/",
+                                                                  "src/probabilidade/",
+                                                                  "src/servicos/decisor_hibrido.py"
+                                                              ],
+                              "oraculo_trader_capital_painel":  [
+                                                                    "src/risco/",
+                                                                    "src/multiativo/",
+                                                                    "src/servicos/testnet_auto_trader.py",
+                                                                    "src/servicos/dashboard.py",
+                                                                    "src/servicos/painel_conta.py"
+                                                                ]
+                          },
+    "invariantes":  [
+                        "fonte_de_verdade_unica",
+                        "zero_trust_em_toda_borda",
+                        "fail_safe_em_fluxo_monetario",
+                        "sem_fallback_silencioso",
+                        "sem_duplicacao_de_regra_canonica"
+                    ],
+    "entradas":  [
+                     {
+                         "ts_utc":  "2026-04-17T03:17:20Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "AGENTS.MD",
+                                           ".codex/agents/*.toml",
+                                           ".codex/contex.json"
+                                       ],
+                         "resumo":  "Contrato de memoria operacional padronizado. Todos os agentes devem ler e atualizar .codex/contex.json com delta curto e sem segredo.",
+                         "risco":  "baixo",
+                         "testes":  [
+                                        "validacao_estatica_arquivos"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T03:20:07Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/main.py",
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "frontend/public/app.js",
+                                           "tests/test_api.py",
+                                           "tests/test_api_sessao_painel.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Bug de capital corrigido: bot reidrata perfis do ajuste persistido quando runtime vem vazio; diagnostico diferencia capital baixo de saldo quote insuficiente.",
+                         "risco":  "baixo",
+                         "testes":  [
+                                        "python -m pytest -q tests/test_api.py",
+                                        "python -m pytest -q tests/test_api_sessao_painel.py",
+                                        "python -m pytest -q tests/test_testnet_auto_trader.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T11:03:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Seletor de entrada passou a priorizar mini por score composto sem remover filtros de EV/liquidez; evita baixa frequencia artificial.",
+                         "risco":  "medio; perfis conservadores podem operar menos quando mini estiver habilitado",
+                         "testes":  [
+                                        "python -m pytest -q tests/test_testnet_auto_trader.py",
+                                        "python -m pytest -q tests/test_auto_trader_state.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T11:04:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Saida SELL sem dependencia de tempo minimo: trailing e envio de ordem revalidam lucro liquido minimo do ciclo antes da execucao.",
+                         "risco":  "baixo; risco residual de slippage permanece inerente a ordem market",
+                         "testes":  [
+                                        "python -m pytest -q tests/test_testnet_auto_trader.py",
+                                        "python -m pytest -q tests/test_auto_trader_state.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T14:44:57Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "frontend/public/index.html",
+                                           "frontend/public/estilos.css",
+                                           "frontend/public/app.js"
+                                       ],
+                         "resumo":  "Frontend redesenhado sem hero: sidebar compacta, tema dark com acento roxo, cores semanticas, dashboard separado por conta/mercado, graficos com data e UX 502 pausando polling.",
+                         "risco":  "baixo; mudanca visual e de UX sem alterar contrato canonico do backend",
+                         "testes":  [
+                                        "node --check frontend/public/app.js",
+                                        "node --check frontend/server.js",
+                                        "validacao_ids_getElementById_vs_index"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T15:35:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "frontend/public/index.html",
+                                           "frontend/public/estilos.css",
+                                           "frontend/public/app.js"
+                                       ],
+                         "resumo":  "Refino visual corporativo-futurista sem excesso: densidade otimizada, sidebar 2 colunas de mini-cards, blocos semanticos de dashboard, melhorias de contraste e traducoes de motivos compostos para leitura iniciante.",
+                         "risco":  "baixo; apenas UX/estilo e semantica de mensagem",
+                         "testes":  [
+                                        "node --check frontend/public/app.js",
+                                        "node --check frontend/server.js",
+                                        "validacao_ids_getElementById_vs_index missing_ids=0"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T16:10:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "tests/test_testnet_auto_trader.py",
+                                           "tests/test_auto_trader_state.py",
+                                           "tests/test_risk_and_execution.py"
+                                       ],
+                         "resumo":  "Core do auto trader validado: por padrao nao assume ciclo de saldo legado sem historico, preserva motivo semantico de bloqueio e remove piso percentual implicito de lucro minimo; adicionada cobertura de compatibilidade quando bloqueio e desativado.",
+                         "risco":  "medio; saldo legado sem historico fica isolado por seguranca ate reconciliacao explicita",
+                         "testes":  [
+                                        ".venv\\\\Scripts\\\\python.exe -m pytest -q tests/test_testnet_auto_trader.py",
+                                        ".venv\\\\Scripts\\\\python.exe -m pytest -q tests/test_auto_trader_state.py tests/test_risk_and_execution.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-17T22:07:07Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "src/risco/risk_engine.py",
+                                           "tests/test_testnet_auto_trader.py",
+                                           "tests/test_risk_and_execution.py"
+                                       ],
+                         "resumo":  "Auto trader corrigido contra travas falsas: piso operacional do auto nao herda minimo global de risco, scanner nao promove BUY invalido sem quote e acao desconhecida vira HOLD fail-safe.",
+                         "risco":  "medio; ciclo negativo continua preso por regra explicita de nao vender abaixo do lucro minimo",
+                         "testes":  [
+                                        ".venv\\\\Scripts\\\\python.exe -m pytest -q tests/test_risk_and_execution.py tests/test_testnet_auto_trader.py",
+                                        ".venv\\\\Scripts\\\\python.exe -m pytest -q tests/test_auto_trader_state.py tests/test_multiativo.py tests/test_risk_and_execution.py tests/test_testnet_auto_trader.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T00:45:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "frontend/public/app.js"
+                                       ],
+                         "resumo":  "Painel ajustado para diferenciar estimativa do sinal de lucro aberto real; evita leitura de PnL positivo quando ciclo ativo esta negativo.",
+                         "risco":  "baixo; camada semantica de UI sem alterar regra canonica do backend",
+                         "testes":  [
+                                        "nao executado; shell local retornou 0xC0000142 ao iniciar processos"
+                                    ],
+                         "status":  "pendente"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T02:44:26Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Auto trader deixou de monopolizar foco em ciclo negativo recente: posicao abaixo do lucro minimo aguarda sem bloquear entradas viaveis; heartbeat revisa o ciclo para nao perder saida. Logs auto_trade ficaram semanticos.",
+                         "risco":  "medio; ainda ha um ciclo por par, perfis independentes por mesmo par exigem refatoracao maior",
+                         "testes":  [
+                                        ".venv\\Scripts\\python.exe -m pytest -q tests/test_testnet_auto_trader.py tests/test_risk_and_execution.py tests/test_auto_trader_state.py tests/test_multiativo.py",
+                                        ".venv\\Scripts\\python.exe -m py_compile src\\servicos\\testnet_auto_trader.py tests\\test_testnet_auto_trader.py"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T03:55:32Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "frontend/public/index.html",
+                                           "frontend/public/app.js",
+                                           "src/servicos/ajustes.py",
+                                           "src/main.py",
+                                           "tests/test_api.py"
+                                       ],
+                         "resumo":  "Pagina de configuracoes removida do front; ajustes de sinal, risco e operacional ficaram automaticos/read-only; cliente so altera perfis/capital do auto trader. notional_usdt e derivado dos perfis inclusive contra estado persistido conflitante.",
+                         "risco":  "medio; operadores perdem override manual de pesos, mas elimina conflito com autonomia e overrides persistidos antigos.",
+                         "testes":  [
+                                        ".venv\\Scripts\\python.exe -m pytest -q tests/test_api.py tests/test_api_sessao_painel.py",
+                                        ".venv\\Scripts\\python.exe -m pytest -q tests/test_testnet_auto_trader.py tests/test_auto_trader_state.py tests/test_risk_and_execution.py",
+                                        "node --check frontend/public/app.js",
+                                        "node --check frontend/server.js",
+                                        ".venv\\Scripts\\python.exe -m pytest -q"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T11:10:19Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "frontend/public/index.html",
+                                           "frontend/public/app.js",
+                                           "src/main.py",
+                                           "src/servicos/ajustes.py",
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "tests/test_api.py",
+                                           "tests/test_api_sessao_painel.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Config manual removida; cliente declara apenas perfis_capital. Backend bloqueia config generica por padrao, rejeita notional_usdt publico, deriva notional da soma dos perfis e bloqueia auto/config em conta real sem flag. Front sem gates de capital.",
+                         "risco":  "baixo; manter PERMITIR_CONFIG_API=false em producao e monitorar auditoria auto_config_atualizada",
+                         "testes":  [
+                                        "node --check frontend/public/app.js",
+                                        "node --check frontend/server.js",
+                                        ".venv\\Scripts\\python.exe -m pytest -q =\u003e 97 passed",
+                                        "validacao agentes: arquitetura/interface/seguranca/capital aprovadas"
+                                    ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T11:30:00Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/main.py",
+                                           "frontend/public/app.js",
+                                           "tests/test_api_sessao_painel.py"
+                                       ],
+                         "resumo":  "Status do auto trader passou a expor config.perfis_capital canonico no login/status; frontend bloqueia operacao se contrato canonico faltar, sem fallback local de capital.",
+                         "risco":  "baixo; bloqueio fail-safe pode exigir refresh/login quando backend antigo nao enviar config canonica",
+                         "testes":  [
+                                        ".venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider tests/test_api_sessao_painel.py tests/test_api.py",
+                                        ".venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider",
+                                        "node --check frontend/public/app.js",
+                                        "node --check frontend/server.js",
+                                        "abuso manual: login sem segredo; config sensivel 403; notional publico 422; auto/config real 403"
+                                     ],
+                         "status":  "aprovado"
+                     },
+                     {
+                         "ts_utc":  "2026-04-18T17:18:17Z",
+                         "autor":  "codex",
+                         "ownership":  [
+                                           "src/main.py",
+                                           "src/servicos/ajustes.py",
+                                           "src/servicos/testnet_auto_trader.py",
+                                           "frontend/public/app.js",
+                                           "tests/test_api.py",
+                                           "tests/test_api_sessao_painel.py",
+                                           "tests/test_auto_trader_state.py",
+                                           "tests/test_testnet_auto_trader.py"
+                                       ],
+                         "resumo":  "Validacao read-only do contrato capital/painel bloqueou patch: auto/config persiste perfis zerados antes de rejeitar 400, quebrando atomicidade do capital por perfil.",
+                         "risco":  "medio; request invalido pode zerar capital persistido e divergir runtime/painel sem auto-alocar saldo",
+                         "testes":  [
+                                        ".venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider tests/test_api_sessao_painel.py tests/test_api.py tests/test_auto_trader_state.py",
+                                        ".venv\\Scripts\\python.exe -m pytest -q -p no:cacheprovider tests/test_testnet_auto_trader.py -k \"perfil or capital or lucro\"",
+                                        "node --check frontend/public/app.js",
+                                        "probe DB temporario: PUT auto/config invalido retornou 400 mas persistiu capital 0/notional 0"
+                                    ],
+                         "status":  "bloqueado"
+                     }
+                 ]
+}

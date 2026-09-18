@@ -3,167 +3,253 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <meta name="description" content="Oráculo — Auto-trading autônomo para Binance com IA integrada"/>
+  <meta name="theme-color" content="#06070b"/>
   <title>Oráculo · Auto-Trading</title>
-  <link rel="icon" type="image/png" href="/img/oraculo.png"/>
+  <link rel="icon" type="image/svg+xml" href="/img/oraculo.svg"/>
   <link rel="stylesheet" href="/estilos.css"/>
   <script defer src="/app.js"></script>
 </head>
 <body>
 
-<!-- LOGIN -->
-<section id="login" class="card login-card">
-  <div class="brand">
-    <img src="/img/oraculo.png" alt="Oráculo" class="logo"/>
+<!-- ═══ AUTENTICAÇÃO ═══ -->
+<section id="login" class="card login-card" aria-labelledby="login-title">
+  <header class="brand">
+    <img src="/img/oraculo.svg" alt="" class="logo" width="52" height="52"/>
     <div>
-      <h1>Oráculo</h1>
+      <h1 id="login-title">Oráculo</h1>
       <p class="sub">Auto-Trading Autônomo · Binance</p>
     </div>
-  </div>
-  <form id="formLogin">
-    <label>API Key
+  </header>
+
+  <form id="formLogin" aria-label="Credenciais da API Binance">
+    <label for="apiKey">API Key
       <input id="apiKey" type="password" autocomplete="off" placeholder="Chave pública" required/>
     </label>
-    <label>API Secret
+    <label for="apiSecret">API Secret
       <input id="apiSecret" type="password" autocomplete="off" placeholder="Chave secreta" required/>
     </label>
-    <label class="toggle-row">
-      <span>Testnet</span>
-      <label class="switch">
+
+    <div class="toggle-row" role="group" aria-label="Ambiente de operação">
+      <span>Ambiente</span>
+      <label class="switch" aria-label="Alternar testnet">
         <input id="usarTestnet" type="checkbox" checked/>
         <span class="slider"></span>
       </label>
       <span id="modoLabel">Testnet</span>
-    </label>
-    <p id="erroLogin" class="erro hidden"></p>
-    <button type="submit" id="btnEntrar">Conectar</button>
+    </div>
+
+    <p id="erroLogin" class="erro hidden" role="alert"></p>
+    <button type="submit" id="btnEntrar" class="btn-primary btn-lg">Conectar à Binance</button>
   </form>
 </section>
 
-<!-- APP -->
+<!-- ═══ APLICAÇÃO ═══ -->
 <div id="app" class="hidden">
 
-  <!-- TOPBAR -->
-  <header class="topbar">
+  <header class="topbar" role="banner">
     <div class="topbar__brand">
-      <img src="/img/oraculo.png" alt="Oráculo" class="logo-sm"/>
+      <img src="/img/oraculo.svg" alt="" class="logo-sm" width="30" height="30"/>
       <span>Oráculo</span>
     </div>
-    <div class="topbar__status">
+    <nav class="topbar__status" aria-label="Status da sessão">
       <span id="badgeModo" class="badge">Testnet</span>
       <span id="badgeConexao" class="badge badge-ok">Conectado</span>
-      <span id="labelConta" class="muted-sm"></span>
-    </div>
-    <button id="btnSair" class="btn-ghost">Sair</button>
+      <span id="labelConta" class="muted-sm mono"></span>
+    </nav>
+    <button id="btnSair" class="btn-ghost" type="button">Sair</button>
   </header>
 
-  <!-- GRID PRINCIPAL -->
-  <main class="grid">
+  <nav class="app-nav" aria-label="Navegação principal" role="tablist">
+    <button class="app-nav__tab" type="button" role="tab" id="abaPainel" data-pagina="painel" aria-selected="true" aria-controls="paginaPainel">Painel</button>
+    <button class="app-nav__tab" type="button" role="tab" id="abaIa" data-pagina="ia" aria-selected="false" aria-controls="paginaIa">IA e chaves</button>
+    <button class="app-nav__tab" type="button" role="tab" id="abaMercado" data-pagina="mercado" aria-selected="false" aria-controls="paginaMercado">Mercado</button>
+  </nav>
 
-    <!-- COLUNA ESQUERDA: CONTROLE -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Auto-Trading</h2>
+  <main id="paginaPainel" class="grid" role="tabpanel" aria-labelledby="abaPainel">
+
+    <!-- Painel de controle -->
+    <section class="card" aria-labelledby="ctrl-title">
+      <header class="card-head">
+        <h2 id="ctrl-title">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+          </svg>
+          Controle
+        </h2>
         <span id="badgeBot" class="badge">Pausado</span>
-      </div>
+      </header>
+      <p class="section-desc">Acompanhe sua carteira e controle o robô.</p>
 
-      <!-- SALDO -->
-      <div class="stat-row">
-        <div class="stat">
-          <span class="stat-label">Saldo disponível</span>
+      <div class="stat-row" role="group" aria-label="Resumo financeiro">
+        <article class="stat">
+          <span class="stat-label">Patrimônio da carteira</span>
           <strong id="valSaldo" class="stat-big">--</strong>
-          <span id="valSaldoPct" class="stat-pct neutral">0,00%</span>
-        </div>
-        <div class="stat">
-          <span class="stat-label">PnL líquido</span>
-          <strong id="valPnl" class="stat-big">--</strong>
-          <span id="valPnlPct" class="stat-pct neutral">0,00%</span>
-        </div>
+          <span id="valSaldoPct" class="muted-sm">Total convertido para USDT</span>
+          <button id="btnCarteira" class="btn-ghost btn-sm carteira-btn" type="button" aria-haspopup="dialog" aria-controls="carteiraDialog">Ver criptomoedas</button>
+        </article>
+        <article class="stat">
+          <span class="stat-label">Saldo inicial desta sessão</span>
+          <strong id="valSaldoInicial" class="stat-big">--</strong>
+          <span id="saldoInicialData" class="muted-sm">Aguardando a primeira leitura</span>
+        </article>
+        <article class="stat">
+          <span class="stat-label">Mudança na carteira nesta sessão</span>
+          <strong id="valMudancaCarteira" class="stat-big stat-delta-list">--</strong>
+          <span id="mudancaSessaoInfo" class="muted-sm">Comparação por moeda</span>
+        </article>
       </div>
 
-      <!-- CAPITAL % -->
       <div class="capital-block">
-        <label>Capital para operar
+        <label for="capitalPct">
+          Capital para operar
           <span id="capitalPctLabel" class="pct-label">30%</span>
         </label>
-        <input id="capitalPct" type="range" min="10" max="100" step="10" value="30"/>
-        <div class="pct-marks">
+        <input id="capitalPct" type="range" min="10" max="100" step="10" value="30"
+               aria-valuemin="10" aria-valuemax="100" aria-valuenow="30"/>
+        <div class="pct-marks" aria-hidden="true">
           <span>10%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
         </div>
         <p id="capitalUsdt" class="capital-usdt muted-sm">≈ -- USDT</p>
       </div>
 
-      <!-- BOTÃO START/STOP -->
-      <button id="btnToggle" class="btn-primary btn-lg">Iniciar Auto-Trading</button>
-      <p id="msgBot" class="muted-sm"></p>
+      <button id="btnToggle" class="btn-primary btn-lg" type="button">Iniciar Auto-Trading</button>
+      <p id="msgBot" class="muted-sm" role="status" aria-live="polite"></p>
     </section>
 
-    <!-- COLUNA DIREITA: MÉTRICAS + AI -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Métricas</h2>
-        <span id="tsAtualiza" class="muted-sm">--</span>
-        <button id="btnRefresh" class="btn-ghost btn-sm">↺</button>
-      </div>
+    <!-- Painel de métricas -->
+    <section class="card" aria-labelledby="metrics-title">
+      <header class="card-head">
+        <h2 id="metrics-title">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M3 3v18h18"/><path d="M7 16l4-8 4 5 5-9"/>
+          </svg>
+          Métricas
+        </h2>
+        <time id="tsAtualiza" class="muted-sm" datetime="">--</time>
+        <button id="btnRefresh" class="btn-ghost btn-sm btn-icon" type="button" aria-label="Atualizar dados" title="Atualizar">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>
+          </svg>
+        </button>
+      </header>
+      <p class="section-desc">Indicadores simples do robô.</p>
 
-      <div class="metrics-grid">
-        <div class="metric">
-          <span class="metric-label">Win Rate</span>
+      <div class="metrics-grid" role="list" aria-label="Indicadores operacionais">
+        <article class="metric" role="listitem">
+          <span class="metric-label" title="Percentual de operações fechadas positivas desde a inicialização do robô; não é previsão de preço.">Operações positivas</span>
           <strong id="mWinRate">--%</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Trades hoje</span>
+        </article>
+        <article class="metric" role="listitem">
+          <span class="metric-label" title="Compras e vendas concluídas desde a inicialização do robô.">Operações concluídas</span>
           <strong id="mTrades">--</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Regime mercado</span>
+        </article>
+        <article class="metric" role="listitem">
+          <span class="metric-label">Mercado agora</span>
           <strong id="mRegime">--</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Desconto BNB</span>
+        </article>
+        <article class="metric" role="listitem">
+          <span class="metric-label">Desconto na taxa</span>
           <strong id="mBnb">--</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Taxa efetiva</span>
+        </article>
+        <article class="metric" role="listitem">
+          <span class="metric-label" title="Taxa por ordem considerada pelo robô.">Taxa usada</span>
           <strong id="mTaxa">--%</strong>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Melhor par</span>
+        </article>
+        <article class="metric" role="listitem">
+          <span class="metric-label">Par acompanhado</span>
           <strong id="mMelhorPar">--</strong>
-        </div>
+        </article>
       </div>
 
-      <!-- AI INSIGHT -->
-      <div class="ai-box" id="aiBox">
-        <div class="ai-box__head">
-          <span class="ai-label">🤖 AI Advisor</span>
-          <span id="aiModelo" class="muted-sm"></span>
-          <button id="btnAi" class="btn-ghost btn-sm">Consultar</button>
-        </div>
+      <aside class="ai-box" id="aiBox" aria-labelledby="ai-title">
+        <header class="ai-box__head">
+          <span id="ai-title" class="ai-label" title="Consulta manual — não decide trades">AI Advisor</span>
+          <span id="aiModelo" class="muted-sm mono"></span>
+          <button id="btnAi" class="btn-ghost btn-sm" type="button">Consultar</button>
+        </header>
+        <p id="aiSaudeLine" class="muted-sm" title="IA da camada de decisão do bot (voto + veto)">IA de decisão: --</p>
         <div id="aiContent" class="ai-content">
-          <p class="muted-sm">Clique em "Consultar" para obter recomendação da IA.</p>
+          <p class="muted-sm">Clique em <strong>Consultar</strong> para obter recomendação da IA.</p>
         </div>
-      </div>
+      </aside>
     </section>
 
-    <!-- LINHA INFERIOR: TRADES RECENTES -->
-    <section class="card card-full">
-      <div class="card-head">
-        <h2>Trades recentes</h2>
-        <span id="totalTrades" class="muted-sm">0 trades</span>
-      </div>
+    <!-- Histórico de trades -->
+    <section class="card card-full" aria-labelledby="trades-title">
+      <header class="card-head">
+        <h2 id="trades-title" title="Execuções de ordens na conta conectada; uma ordem pode ter mais de um preenchimento">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>
+          </svg>
+          Ordens recentes · BTCUSDT
+        </h2>
+        <span id="totalTrades" class="muted-sm mono">-- execuções</span>
+      </header>
+
       <div class="table-wrap">
         <table>
-          <thead><tr>
-            <th>Hora</th><th>Par</th><th>Lado</th>
-            <th>Preço</th><th>Notional</th><th>PnL</th><th>PnL%</th>
-          </tr></thead>
-          <tbody id="tabelaTrades"><tr><td colspan="7" class="empty">Sem trades registrados.</td></tr></tbody>
+          <thead>
+            <tr>
+              <th scope="col">Hora</th>
+              <th scope="col">Par</th>
+              <th scope="col">Tipo</th>
+              <th scope="col">Preço</th>
+              <th scope="col">Valor</th>
+              <th scope="col">Resultado estimado</th>
+              <th scope="col" title="Resultado dividido pelo valor da venda; não é retorno sobre o patrimônio">Variação</th>
+            </tr>
+          </thead>
+          <tbody id="tabelaTrades">
+            <tr><td colspan="7" class="empty">Sem trades registrados.</td></tr>
+          </tbody>
         </table>
       </div>
     </section>
 
   </main>
+
+  <main id="paginaIa" class="grid hidden" role="tabpanel" aria-labelledby="abaIa">
+    <section class="card card-full" aria-labelledby="iaPaginaTitulo">
+      <header class="card-head">
+        <h2 id="iaPaginaTitulo">IA e chaves</h2>
+      </header>
+      <p class="section-desc">Acompanhe a IA usada pelo robô.</p>
+      <p class="muted-sm">Configure chaves de IA somente no ambiente do servidor. Nunca cole segredos neste painel.</p>
+      <dl class="status-lista" aria-live="polite">
+        <div><dt>Status</dt><dd id="iaPaginaStatus">--</dd></div>
+        <div><dt>Modelo</dt><dd id="iaPaginaModelo">--</dd></div>
+        <div><dt>Uso hoje</dt><dd id="iaPaginaUso">--</dd></div>
+        <div><dt>Chaves no servidor</dt><dd id="iaPaginaChaves">--</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <main id="paginaMercado" class="grid hidden" role="tabpanel" aria-labelledby="abaMercado">
+    <section class="card card-full" aria-labelledby="mercadoTitulo">
+      <header class="card-head">
+        <h2 id="mercadoTitulo">Mercado cripto</h2>
+        <button id="btnAtualizarNoticias" class="btn-ghost btn-sm" type="button">Atualizar notícias</button>
+      </header>
+      <p id="noticiasStatus" class="section-desc" role="status">Notícias recentes sobre BTCUSDT.</p>
+      <div id="listaNoticias" class="noticias-lista" aria-live="polite"></div>
+      <p id="noticiasVazias" class="muted-sm">Nenhuma notícia disponível.</p>
+    </section>
+  </main>
 </div>
+
+<dialog id="carteiraDialog" class="carteira-dialog" aria-labelledby="carteiraTitulo">
+  <header class="carteira-dialog__head">
+    <div>
+      <h2 id="carteiraTitulo">Criptomoedas na carteira</h2>
+      <p class="muted-sm">Selecione uma moeda para ver seu saldo.</p>
+    </div>
+    <button id="btnFecharCarteira" class="btn-ghost btn-sm btn-icon" type="button" aria-label="Fechar carteira">×</button>
+  </header>
+  <div id="listaCarteira" class="carteira-lista" aria-label="Ativos com saldo"></div>
+  <p id="carteiraVazia" class="muted-sm">Nenhuma criptomoeda com saldo.</p>
+  <div id="carteiraDetalhe" class="carteira-detalhe hidden" aria-live="polite"></div>
+</dialog>
 
 </body>
 </html>

@@ -20,6 +20,14 @@ def test_configurador_extraido_e_reexportado():
 
     assert god._usuario_virtual is _usuario_virtual
     assert god._ajustes_microtrading_auto is _ajustes_microtrading_auto
-    # Freios conservadores aplicados ao usuário virtual.
+    # Freios conservadores aplicados ao usuário virtual: respeita o valor do caller dentro
+    # da faixa [1, 5] — não força mais sempre 1 (bug de posição-fantasma corrigido).
+    # Um valor acima do teto defensivo (9) é limitado a 5, não colapsado para 1.
     risco = _usuario_virtual({"max_trades_abertos": 9}, modo_testnet=True)["risk_config"]
-    assert risco["max_trades_abertos"] == 1
+    assert risco["max_trades_abertos"] == 5
+    # Valores dentro da faixa são respeitados como estão (ex.: o autotrader real usa 5).
+    risco_3 = _usuario_virtual({"max_trades_abertos": 3}, modo_testnet=True)["risk_config"]
+    assert risco_3["max_trades_abertos"] == 3
+    # Piso continua em 1 (nunca 0 ou negativo).
+    risco_0 = _usuario_virtual({"max_trades_abertos": 0}, modo_testnet=True)["risk_config"]
+    assert risco_0["max_trades_abertos"] == 1

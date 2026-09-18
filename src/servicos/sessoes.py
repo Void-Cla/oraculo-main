@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import secrets
 import time
 from typing import Any
@@ -125,6 +126,94 @@ async def encerrar_sessao(token: str | None) -> bool:
     async with _LOCK:
         _CREDENCIAIS.pop(token, None)
         return _SESSOES.pop(token, None) is not None
+
+
+def _normalizar_ativos_sessao(ativos: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    normalizados: list[dict[str, Any]] = []
+    for item in ativos or []:
+        try:
+            ativo = str(item["ativo"]).upper()
+            quantidade = float(item["total"])
+            valor_usdt = float(item["valor_usdt"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return []
+        if not ativo or not all(math.isfinite(valor) and valor >= 0 for valor in (quantidade, valor_usdt)):
+            return []
+        normalizados.append({"ativo": ativo, "total": quantidade, "valor_usdt": valor_usdt})
+    return sorted(normalizados, key=lambda item: item["ativo"])
+
+
+def _comparar_ativos_sessao(
+    iniciais: list[dict[str, Any]], atuais: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    por_ativo_inicial = {item["ativo"]: item for item in iniciais}
+    por_ativo_atual = {item["ativo"]: item for item in atuais}
+    comparacao: list[dict[str, Any]] = []
+    for ativo in sorted(set(por_ativo_inicial) | set(por_ativo_atual)):
+        inicial = por_ativo_inicial.get(ativo, {"total": 0.0, "valor_usdt": 0.0})
+        atual = por_ativo_atual.get(ativo, {"total": 0.0, "valor_usdt": 0.0})
+        comparacao.append({
+            "ativo": ativo,
+            "quantidade_inicial": inicial["total"],
+            "quantidade_atual": atual["total"],
+            "variacao_quantidade": round(atual["total"] - inicial["total"], 12),
+            "valor_inicial_usdt": inicial["valor_usdt"],
+            "valor_atual_usdt": atual["valor_usdt"],
+        })
+    return comparacao
+
+
+async def comparar_patrimonio_sessao(
+    token: str | None,
+    saldo: float | None,
+    escopo: tuple[str, ...],
+    *,
+    ativos: list[dict[str, Any]] | None = None,
+    fluxos_externos_usdt: float | None = None,
+) -> dict[str, Any]:
+    """Mantém a primeira fotografia válida até logout/expiração, sob o lock da sessão."""
+    resposta: dict[str, Any] = {
+        "disponivel": False, "saldo_inicial_usdt": None, "saldo_atual_usdt": None,
+        "variacao_usdt": None, "variacao_pct": None, "registrado_em": None,
+        "escopo_ativos": list(escopo), "motivo": "sessao_indisponivel",
+        "aportes_saques_ajustados": False, "fluxos_externos_usdt": None,
+        "resultado_trading_usdt": None, "resultado_trading_conciliado": False,
+        "ativos": [],
+    }
+    atuais = _normalizar_ativos_sessao(ativos)
+    fluxos_validos = isinstance(fluxos_externos_usdt, (int, float)) and math.isfinite(fluxos_externos_usdt)
+    async with _LOCK:
+        _limpar_expiradas_sem_lock()
+        sessao = _SESSOES.get(token or "")
+        if sessao is None:
+            return resposta
+        fotografia = sessao.get("patrimonio_inicial")
+        if fotografia:
+            resposta.update(saldo_inicial_usdt=fotografia["saldo"],
+                            registrado_em=fotografia["ts"], escopo_ativos=list(fotografia["escopo"]))
+        if saldo is None or not math.isfinite(saldo) or saldo < 0 or not escopo or (ativos is not None and not atuais):
+            resposta["motivo"] = "valoracao_incompleta"
+            return resposta
+        if fotografia is None:
+            fotografia = {"saldo": saldo, "ts": _agora_ms(), "escopo": escopo, "ativos": atuais}
+            sessao["patrimonio_inicial"] = fotografia
+        inicial = fotografia["saldo"]
+        variacao = saldo - inicial
+        resposta.update(
+            disponivel=True, saldo_inicial_usdt=inicial, saldo_atual_usdt=saldo,
+            variacao_usdt=round(variacao, 8),
+            variacao_pct=(variacao / inicial * 100) if inicial > 0 else None,
+            registrado_em=fotografia["ts"],
+            escopo_ativos=sorted(set(fotografia["escopo"]) | set(escopo)),
+            ativos=_comparar_ativos_sessao(fotografia.get("ativos", []), atuais),
+            aportes_saques_ajustados=fluxos_validos,
+            fluxos_externos_usdt=fluxos_externos_usdt if fluxos_validos else None,
+            resultado_trading_usdt=None,
+            resultado_trading_conciliado=False,
+            motivo=("fluxos_externos_informados_sem_conciliacao_de_fills_e_taxas"
+                    if fluxos_validos else "variacao_patrimonial_nao_conciliada_com_fluxos"),
+        )
+    return resposta
 
 
 def resetar_sessoes_teste() -> None:

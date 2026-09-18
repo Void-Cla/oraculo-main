@@ -14,6 +14,9 @@ import os
 import time
 from typing import Any
 
+from src.observabilidade.logger import get_logger
+
+_LOG = get_logger("ai_advisor")
 _GPT_KEY = os.getenv("GPT_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 _MODELO = "gpt-4o-mini"
 _MAX_TOKENS = 300
@@ -244,5 +247,7 @@ async def persistir_insight(
             ),
         )
         await conn.commit()
-    except Exception:
-        pass
+    except Exception as exc:  # persistência best-effort — não derruba o fluxo, mas não some
+        # GAP-FLX-05: antes era `except: pass` (única persistência do projeto sem log).
+        # Uma falha recorrente de escrita de insight agora deixa rastro (dado advisory).
+        _LOG.warning("falha_persistir_ai_insight", extra={"erro": str(exc)})

@@ -36,7 +36,16 @@ def montar_perfil_taxas(
     desconto_ativo = saldo_bnb >= _BNB_SALDO_MINIMO
     fator = (1.0 - _BNB_DESCONTO_RATIO) if desconto_ativo else 1.0
 
+    # Taxa OPERACIONAL: a que o motor de fato usa nas contas de EV/lucro. O testnet da Binance
+    # devolve commissionRates=0 (não cobra taxa), mas o bot NUNCA precifica com taxa zero — os
+    # consumidores aplicam piso (`aplicar_taxa_efetiva` só sobrescreve se >0; o trader usa
+    # `or 0.1`). Este campo espelha esse piso para o FRONT exibir a taxa VERDADEIRA usada nas
+    # decisões, em vez do 0.000% cru do testnet (que é verdade da fonte, mas não do cálculo).
+    taker_efetiva = taker * fator
+    taker_operacional = taker_efetiva if taker_efetiva > 0.0 else _TAXA_PADRAO_DECIMAL
+
     return {
+        "taker_pct_operacional":   round(taker_operacional * 100.0, 4),
         "maker_decimal":           maker,
         "taker_decimal":           taker,
         "buyer_decimal":           buyer,
